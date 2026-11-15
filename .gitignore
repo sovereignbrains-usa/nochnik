@@ -1,5 +1,8 @@
-Night.exe
+build/
+dist/
 *.pdb
+*.obj
+*.res
 check.txt
 crash.txt
 ui-check.txt

@@ -18,11 +18,11 @@ New-Item -ItemType Directory -Force build | Out-Null
 rc /nologo /utf-8 /fo build\night.res night.rc
 if ($LASTEXITCODE) { throw 'rc не собрал ресурсы' }
 
-cl /nologo /std:c++20 /O2 /MT /EHsc /utf-8 /W3 /permissive- /Zc:__cplusplus `
-    /DUNICODE /D_UNICODE `
+cl /nologo /std:c++20 /O2 /MT /EHsc /utf-8 /W4 /permissive- /sdl /GS /guard:cf /Zc:__cplusplus `
+    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN `
     /Fobuild\ /Fe:build\Night.exe `
-    night.cpp startup.cpp build\night.res `
-    /link /SUBSYSTEM:WINDOWS /MANIFEST:NO /OPT:REF /OPT:ICF `
+    night.cpp base.cpp config.cpp display.cpp selfcheck.cpp startup.cpp build\night.res `
+    /link /SUBSYSTEM:WINDOWS /MANIFEST:NO /OPT:REF /OPT:ICF /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /CETCOMPAT /guard:cf `
     user32.lib gdi32.lib gdiplus.lib shell32.lib shlwapi.lib ole32.lib advapi32.lib dwmapi.lib wtsapi32.lib uxtheme.lib windowsapp.lib
 if ($LASTEXITCODE) { throw 'cl не собрал' }
 

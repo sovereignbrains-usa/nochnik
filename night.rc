@@ -5,6 +5,8 @@
 
 1 ICON "assets\\night.ico"
 1 RT_MANIFEST "app.manifest"
+101 RCDATA "assets\\fonts\\Onest-Regular.ttf"
+102 RCDATA "assets\\fonts\\Onest-Bold.ttf"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION NIGHT_VER_MAJOR, NIGHT_VER_MINOR, NIGHT_VER_PATCH, NIGHT_VER_BUILD

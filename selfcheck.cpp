@@ -132,8 +132,18 @@ namespace night
             r.flag("lay-cards-apart", apart, true);
             r.flag("lay-keys", keys, true);
             r.flag("lay-slider", Inside(kSlider, kLevelCard) && kSlider.right - kSlider.left > 2 * kSliderPad, true);
-            r.flag("lay-exit", Inside(kExit, win) && !Overlap(kExit, kKeysCard), true);
-            r.flag("lay-hit", In(kExit, kExit.left, kExit.top) && !In(kExit, kExit.right, kExit.top), true);
+            r.flag("lay-hit", In(kKeysCard, kKeysCard.left, kKeysCard.top) && !In(kKeysCard, kKeysCard.right, kKeysCard.top), true);
+            r.flag("lay-footer", kKeysCard.bottom + 40 <= kHeight, true);
+
+            // Окно вопроса при закрытии: кнопки в ряд, внутри окна, текст над ними.
+            const RECT ask{0, 0, kAskWidth, kAskHeight};
+            bool buttons = Inside(kAskText, ask);
+            for (int i = 0; i < 3; i++)
+            {
+                buttons = buttons && Inside(AskButton(i), ask) && !Overlap(AskButton(i), kAskText);
+                for (int j = i + 1; j < 3; j++) buttons = buttons && !Overlap(AskButton(i), AskButton(j));
+            }
+            r.flag("lay-ask", buttons, true);
         }
 
         unsigned short liked[768], plain[768], half[768], again[768];

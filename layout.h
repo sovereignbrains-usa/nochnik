@@ -15,7 +15,12 @@ namespace night::layout
     constexpr RECT kAutoCard{16, 216, 404, 260};   // строка с переключателем, нажимается вся
     constexpr RECT kKeysCard{16, 296, 404, 404};   // три строки сочетаний
     constexpr int kKeyRow = 36;
-    constexpr RECT kExit{316, 448, 404, 476};
+
+    // Окно вопроса при закрытии: заголовок, две строки текста и три кнопки в ряд.
+    constexpr int kAskWidth = 380;
+    constexpr int kAskHeight = 170;
+    constexpr RECT kAskText{20, 18, 360, 104};
+    constexpr RECT AskButton(int i) { return RECT{20 + i * 118, 118, 124 + i * 118, 150}; }
 
     constexpr RECT KeyButton(int i)
     {

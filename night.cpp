@@ -41,6 +41,9 @@ namespace G = Gdiplus;
 
 using namespace night;
 
+// Номера ресурсов RCDATA в night.rc.
+constexpr int kFontRegular = 101, kFontBold = 102;
+
 namespace
 {
     const wchar_t kMainClass[] = L"NightMainWindow";
@@ -53,7 +56,7 @@ namespace
 
     constexpr UINT_PTR kTimer = 1;
 
-    enum Hit { HitNone = -1, HitSlider = 0, HitAuto = 1, HitKey0 = 2, HitExit = 5 };
+    enum Hit { HitNone = -1, HitSlider = 0, HitAuto = 1, HitKey0 = 2 };
 
     const wchar_t* const kKeyTitles[3] = {L"Светлее", L"Темнее", L"Обычный экран"};
     const wchar_t kKeyHelp[] = L"Щёлкните по кнопке и нажмите сочетание.\nEsc — отмена, Backspace — убрать.";
@@ -129,8 +132,30 @@ namespace
         bool trayAdded = false;
         UINT taskbarCreated = 0;
 
-        std::unique_ptr<G::Font> fTitle, fSub, fBase, fBold, fValue, fSmall, fFoot, fLink, fLinkHot;
+        std::unique_ptr<G::PrivateFontCollection> fontColl; // шрифты Onest из ресурсов; живёт дольше шрифтов ниже
+        std::unique_ptr<G::Font> fTitle, fSub, fBase, fBold, fValue, fSmall, fFoot;
         std::unique_ptr<G::Bitmap> iconBmp;
+
+        // Onest (SIL OFL) зашит в exe: Regular и Bold. Нет ресурса или не прочитался — остаётся Segoe UI.
+        std::unique_ptr<G::FontFamily> loadFamily()
+        {
+            fontColl = std::make_unique<G::PrivateFontCollection>();
+            for (int id : {kFontRegular, kFontBold})
+            {
+                HRSRC r = FindResourceW(inst, MAKEINTRESOURCEW(id), RT_RCDATA);
+                HGLOBAL h = r ? LoadResource(inst, r) : nullptr;
+                const void* p = h ? LockResource(h) : nullptr;
+                if (p) fontColl->AddMemoryFont(p, (INT)SizeofResource(inst, r));
+            }
+            if (fontColl->GetFamilyCount() > 0)
+            {
+                G::FontFamily found[1];
+                INT n = 0;
+                if (fontColl->GetFamilies(1, found, &n) == G::Ok && n == 1) return std::unique_ptr<G::FontFamily>(found[0].Clone());
+            }
+            Mark(L"font: Onest не загрузился, берём Segoe UI");
+            return std::make_unique<G::FontFamily>(L"Segoe UI");
+        }
 
         // ---------------------------------------------------------------- создание
 
@@ -144,10 +169,10 @@ namespace
             autoOn = cfg.autostart;
             taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
-            const wchar_t* fam = L"Segoe UI";
+            const std::unique_ptr<G::FontFamily> fam = loadFamily();
             auto mk = [&](float pt, bool bold, bool underline = false) {
                 int style = (bold ? G::FontStyleBold : G::FontStyleRegular) | (underline ? G::FontStyleUnderline : 0);
-                return std::make_unique<G::Font>(fam, pt * 96.0f / 72.0f, style, G::UnitPixel);
+                return std::make_unique<G::Font>(fam.get(), pt * 96.0f / 72.0f, style, G::UnitPixel);
             };
             fTitle = mk(17, true);
             fSub = mk(9.5f, false);
@@ -156,8 +181,6 @@ namespace
             fValue = mk(15, true);
             fSmall = mk(8.5f, false);
             fFoot = mk(9, false);
-            fLink = mk(10, false);
-            fLinkHot = mk(10, false, true);
 
             HICON big = LoadIconW(inst, MAKEINTRESOURCEW(1));
             HICON smallIcon = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
@@ -199,7 +222,7 @@ namespace
         // Значок в шапке: берём размер под текущий масштаб экрана, чтобы не размывался.
         void loadIcon()
         {
-            int px = (int)std::lround(32 * scale);
+            int px = (int)std::lround(44 * scale);
             HICON ic = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, px, px, LR_DEFAULTCOLOR);
             iconBmp.reset();
             if (!ic) return;
@@ -337,6 +360,11 @@ namespace
         void showFromTray()
         {
             if (quitting) return;
+            if (dlg)
+            {
+                SetForegroundWindow(dlg->wnd);
+                return;
+            }
             Mark(L"show");
             allowShow = true;
             if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
@@ -382,6 +410,217 @@ namespace
             DestroyWindow(hwnd);
         }
 
+        // ---------------------------------------------------------------- вопрос при закрытии окна
+
+        enum class Answer { Cancel, Tray, Exit }; // порядок совпадает с кнопками слева направо
+
+        struct Dialog
+        {
+            HWND wnd = nullptr;
+            int hover = -1;
+            int focus = 2;       // по умолчанию «Выйти»: человек нажал крестик
+            int pressed = -1;
+            bool ring = false;   // кольцо фокуса только после клавиатуры
+            bool tracking = false;
+            bool done = false;
+            Answer answer = Answer::Cancel;
+        };
+        Dialog* dlg = nullptr;
+
+        static int AskHit(const App& a, int px, int py)
+        {
+            int x = (int)std::lround(px / a.scale), y = (int)std::lround(py / a.scale);
+            for (int i = 0; i < 3; i++)
+                if (layout::In(layout::AskButton(i), x, y)) return i;
+            return -1;
+        }
+
+        void drawAsk(G::Graphics& g, const Dialog& d)
+        {
+            using namespace layout;
+            T(g, L"Выйти из Ночника?", *fValue, (float)kAskText.left, (float)kAskText.top, (float)(kAskText.right - kAskText.left), 30, cFg);
+            T(g, L"Тёплый свет пропадёт, экран станет обычным.\nЧтобы свет остался, спрячьте Ночник в трей.", *fBase,
+              (float)kAskText.left, (float)kAskText.top + 38, (float)(kAskText.right - kAskText.left),
+              (float)(kAskText.bottom - kAskText.top - 38), cMuted);
+            const wchar_t* names[3] = {L"Отмена", L"В трей", L"Выйти"};
+            for (int i = 0; i < 3; i++)
+            {
+                const RECT r = AskButton(i);
+                float x = (float)r.left, y = (float)r.top, w = (float)(r.right - r.left), h = (float)(r.bottom - r.top);
+                bool primary = i == 2, hot = d.hover == i, down = d.pressed == i && d.hover == i;
+                G::Color fill = primary ? (hot ? cAccentHot : cAccent) : down ? cBtnDown : hot ? cBtnHot : cBtn;
+                FillRound(g, fill, x, y, w, h, 6);
+                if (!primary) StrokeRound(g, cBtnLine, 1, x, y, w, h, 6);
+                T(g, names[i], *fBase, x, y, w, h, primary ? cBg : cFg, G::StringAlignmentCenter, G::StringAlignmentCenter);
+                if (d.ring && d.focus == i) Ring(g, x, y, w, h, 6);
+            }
+        }
+
+        static LRESULT CALLBACK AskProc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+        {
+            if (msg == WM_NCCREATE) SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)lp)->lpCreateParams);
+            App* a = (App*)GetWindowLongPtrW(h, GWLP_USERDATA);
+            if (!a || !a->dlg) return DefWindowProcW(h, msg, wp, lp);
+            Dialog& d = *a->dlg;
+            auto finish = [&](Answer r) {
+                d.answer = r;
+                d.done = true;
+            };
+            auto move = [&](int dir) {
+                d.focus = (d.focus + dir + 3) % 3;
+                d.ring = true;
+                InvalidateRect(h, nullptr, FALSE);
+            };
+            switch (msg)
+            {
+            case WM_CREATE:
+            {
+                BOOL on = TRUE;
+                DwmSetWindowAttribute(h, 20, &on, sizeof on);
+                COLORREF cap = Rgb(cBg), txt = Rgb(cFg);
+                DwmSetWindowAttribute(h, 35, &cap, sizeof cap);
+                DwmSetWindowAttribute(h, 36, &txt, sizeof txt);
+                return 0;
+            }
+            case WM_PAINT:
+            {
+                PAINTSTRUCT ps;
+                HDC hdc = BeginPaint(h, &ps);
+                RECT cr;
+                GetClientRect(h, &cr);
+                a->buffered(hdc, cr.right, cr.bottom, [&](G::Graphics& g) { a->drawAsk(g, d); });
+                EndPaint(h, &ps);
+                return 0;
+            }
+            case WM_ERASEBKGND: return 1;
+            case WM_MOUSEMOVE:
+            {
+                int hit = AskHit(*a, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                if (!d.tracking)
+                {
+                    TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0};
+                    d.tracking = TrackMouseEvent(&t) != FALSE;
+                }
+                if (hit != d.hover)
+                {
+                    d.hover = hit;
+                    SetCursor(LoadCursorW(nullptr, hit >= 0 ? IDC_HAND : IDC_ARROW));
+                    InvalidateRect(h, nullptr, FALSE);
+                }
+                return 0;
+            }
+            case WM_MOUSELEAVE:
+                d.tracking = false;
+                d.hover = -1;
+                InvalidateRect(h, nullptr, FALSE);
+                return 0;
+            case WM_SETCURSOR:
+                if (LOWORD(lp) == HTCLIENT)
+                {
+                    SetCursor(LoadCursorW(nullptr, d.hover >= 0 ? IDC_HAND : IDC_ARROW));
+                    return TRUE;
+                }
+                break;
+            case WM_LBUTTONDOWN:
+                d.pressed = AskHit(*a, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                if (d.pressed >= 0)
+                {
+                    d.focus = d.pressed;
+                    d.ring = false;
+                    SetCapture(h);
+                }
+                InvalidateRect(h, nullptr, FALSE);
+                return 0;
+            case WM_LBUTTONUP:
+            {
+                int hit = AskHit(*a, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                int was = d.pressed;
+                d.pressed = -1;
+                if (GetCapture() == h) ReleaseCapture();
+                InvalidateRect(h, nullptr, FALSE);
+                if (was >= 0 && hit == was) finish((Answer)hit);
+                return 0;
+            }
+            case WM_KEYDOWN:
+                switch (wp)
+                {
+                case VK_ESCAPE: finish(Answer::Cancel); break;
+                case VK_RETURN:
+                case VK_SPACE: finish((Answer)d.focus); break;
+                case VK_TAB: move(GetKeyState(VK_SHIFT) < 0 ? -1 : 1); break;
+                case VK_LEFT: move(-1); break;
+                case VK_RIGHT: move(1); break;
+                }
+                return 0;
+            case WM_CLOSE:
+                finish(Answer::Cancel);
+                return 0;
+            case WM_DESTROY:
+                d.done = true;
+                return 0;
+            }
+            return DefWindowProcW(h, msg, wp, lp);
+        }
+
+        // Тёмное окно с тремя кнопками. Пока оно открыто, главное окно недоступно.
+        Answer askClose()
+        {
+            if (dlg)
+            {
+                SetForegroundWindow(dlg->wnd);
+                return Answer::Cancel;
+            }
+            static const wchar_t kAskClass[] = L"NightAskWindow";
+            static bool registered = false;
+            if (!registered)
+            {
+                WNDCLASSEXW wc{};
+                wc.cbSize = sizeof wc;
+                wc.lpfnWndProc = &App::AskProc;
+                wc.hInstance = inst;
+                wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+                wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
+                wc.lpszClassName = kAskClass;
+                registered = RegisterClassExW(&wc) != 0;
+            }
+
+            Dialog d;
+            dlg = &d;
+            const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOPMOST;
+            RECT r{0, 0, (LONG)std::lround(layout::kAskWidth * scale), (LONG)std::lround(layout::kAskHeight * scale)};
+            AdjustWindowRectExForDpi(&r, style, FALSE, ex, dpi);
+            int w = r.right - r.left, h = r.bottom - r.top;
+            RECT own;
+            GetWindowRect(hwnd, &own);
+            int x = own.left + ((own.right - own.left) - w) / 2, y = own.top + ((own.bottom - own.top) - h) / 2;
+            d.wnd = CreateWindowExW(ex, kAskClass, L"Ночник", style, x, y, w, h, hwnd, nullptr, inst, this);
+            if (!d.wnd)
+            {
+                dlg = nullptr;
+                return Answer::Cancel;
+            }
+            EnableWindow(hwnd, FALSE);
+            ShowWindow(d.wnd, SW_SHOW);
+            SetForegroundWindow(d.wnd);
+
+            MSG m;
+            while (!d.done)
+            {
+                BOOL got = GetMessageW(&m, nullptr, 0, 0);
+                if (got <= 0)
+                {
+                    if (got == 0) PostQuitMessage((int)m.wParam); // отдаём выход главному циклу
+                    break;
+                }
+                TranslateMessage(&m);
+                DispatchMessageW(&m);
+            }
+            if (IsWindow(hwnd)) EnableWindow(hwnd, TRUE); // до закрытия диалога: иначе фокус уйдёт в другое окно
+            if (IsWindow(d.wnd)) DestroyWindow(d.wnd);
+            dlg = nullptr;
+            if (IsWindow(hwnd) && !quitting) SetForegroundWindow(hwnd);
+            return d.answer;
+        }
         // ---------------------------------------------------------------- яркость
 
         void nudge(int delta) { setDim(dim + delta); }
@@ -668,15 +907,21 @@ namespace
 
         void trayMenu()
         {
-            enum { Open = 1, Level, Lighter, Darker, Liked, Off, Auto, Exit };
+            enum { Open = 1, Level, Lighter, Darker, Liked, Warm, Auto, Exit };
+            // Название и сочетание в одну строку: сочетание за табуляцией прижимается к правому краю.
+            auto item = [&](const wchar_t* name, const Bind& b) {
+                return b.empty() ? std::wstring(name) : std::wstring(name) + L"\t" + b.text();
+            };
             HMENU m = CreatePopupMenu();
-            AppendMenuW(m, MF_STRING, Open, L"Открыть");
+            AppendMenuW(m, MF_STRING, Open, L"Открыть Ночник");
+            SetMenuDefaultItem(m, Open, FALSE);
             AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(m, MF_STRING | (effectiveDim() > 0 ? MF_CHECKED : 0), Warm, item(L"Тёплый свет", cfg.keyToggle).c_str());
             AppendMenuW(m, MF_STRING | MF_GRAYED, Level, (L"Тусклость: " + std::to_wstring(dim)).c_str());
-            AppendMenuW(m, MF_STRING, Lighter, L"Светлее");
-            AppendMenuW(m, MF_STRING, Darker, L"Темнее");
-            AppendMenuW(m, MF_STRING, Liked, L"Как было");
-            AppendMenuW(m, MF_STRING, Off, L"Выключить");
+            AppendMenuW(m, MF_STRING, Lighter, item(L"Светлее", cfg.keyLighter).c_str());
+            AppendMenuW(m, MF_STRING, Darker, item(L"Темнее", cfg.keyDarker).c_str());
+            AppendMenuW(m, MF_STRING | (dim == Look::Liked ? MF_GRAYED : 0), Liked,
+                        (L"Рекомендуемая (" + std::to_wstring(Look::Liked) + L")").c_str());
             AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(m, MF_STRING | (autoOn ? MF_CHECKED : 0), Auto, L"Запускать вместе с Windows");
             AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -693,7 +938,10 @@ namespace
             case Lighter: nudge(-5); break;
             case Darker: nudge(5); break;
             case Liked: setDim(Look::Liked); break;
-            case Off: setDim(0); break;
+            case Warm:
+                if (dim == 0) setDim(Look::Liked); // ползунок на нуле: просто включить не из чего
+                else toggleHold();
+                break;
             case Auto: setAutostart(!autoOn); break;
             case Exit: exitClean(); break;
             }
@@ -708,7 +956,6 @@ namespace
             if (layout::In(layout::kAutoCard, x, y)) return HitAuto;
             for (int i = 0; i < 3; i++)
                 if (layout::In(layout::KeyButton(i), x, y)) return HitKey0 + i;
-            if (layout::In(layout::kExit, x, y)) return HitExit;
             return HitNone;
         }
 
@@ -723,8 +970,8 @@ namespace
 
         // ---------------------------------------------------------------- действия и фокус
 
-        // Порядок Tab совпадает с номерами Hit: полоса, переключатель, три сочетания, «Выйти».
-        static constexpr int kFocusCount = 6;
+        // Порядок Tab совпадает с номерами Hit: полоса, переключатель, три сочетания.
+        static constexpr int kFocusCount = 5;
 
         void moveFocus(int dir)
         {
@@ -738,7 +985,6 @@ namespace
         {
             if (hit == HitAuto) setAutostart(!autoOn);
             else if (hit >= HitKey0 && hit < HitKey0 + 3) beginCapture(hit - HitKey0);
-            else if (hit == HitExit) exitClean();
         }
 
         // ---------------------------------------------------------------- рисование
@@ -811,7 +1057,9 @@ namespace
             }
         }
 
-        void paint(HDC hdc, int w, int h)
+        // Рисует в память и одним махом выкладывает в окно: без мерцания.
+        template <class F>
+        void buffered(HDC hdc, int w, int h, F&& fn)
         {
             HDC mem = CreateCompatibleDC(hdc);
             HBITMAP bmp = CreateCompatibleBitmap(hdc, w, h);
@@ -822,12 +1070,17 @@ namespace
                 g.SetTextRenderingHint(G::TextRenderingHintClearTypeGridFit);
                 g.ScaleTransform((G::REAL)scale, (G::REAL)scale);
                 g.Clear(cBg);
-                draw(g);
+                fn(g);
             }
             BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
             SelectObject(mem, old);
             DeleteObject(bmp);
             DeleteDC(mem);
+        }
+
+        void paint(HDC hdc, int w, int h)
+        {
+            buffered(hdc, w, h, [&](G::Graphics& g) { draw(g); });
         }
 
         // Снимок окна в PNG (--render): проверка внешнего вида без экрана.
@@ -862,9 +1115,9 @@ namespace
             auto focused = [&](int hit) { return focusVisible && focus == hit; };
 
             // Шапка.
-            if (iconBmp) g.DrawImage(iconBmp.get(), 24.0f, 16.0f, 32.0f, 32.0f);
-            T(g, L"Ночник", *fTitle, 68, 10, 330, 28, cFg);
-            T(g, L"Тёплый свет для экрана по вечерам", *fSub, 68, 38, 330, 20, cMuted);
+            if (iconBmp) g.DrawImage(iconBmp.get(), 16.0f, 10.0f, 44.0f, 44.0f);
+            T(g, L"Ночник", *fTitle, 70, 10, 330, 28, cFg);
+            T(g, L"Тёплый свет для экрана по вечерам", *fSub, 70, 38, 330, 20, cMuted);
 
             // Тусклость.
             Card(g, kLevelCard);
@@ -954,14 +1207,7 @@ namespace
             T(g, shown ? keyNote : std::wstring(kKeyHelp), *fSmall, 20, 410, 380, 34, shown ? cWarn : cMuted);
 
             // Низ окна.
-            T(g, L"Крестик прячет в трей.", *fFoot, 20, 452, 280, 22, cMuted, Near, Center);
-            {
-                bool hot = hover == HitExit;
-                T(g, L"Выйти", hot ? *fLinkHot : *fLink, (float)kExit.left, (float)kExit.top, (float)(kExit.right - kExit.left),
-                  (float)(kExit.bottom - kExit.top), hot ? cFgBright : cAccent, Far, Center);
-                if (focused(HitExit))
-                    Ring(g, kExit.right - 52.0f, (float)kExit.top + 2, 56.0f, (float)(kExit.bottom - kExit.top) - 4, 6);
-            }
+            T(g, L"Свернуть прячет в трей, крестик закрывает Ночник.", *fFoot, 20, 452, 380, 22, cMuted, Near, Center);
         }
 
         // ---------------------------------------------------------------- таймер и события
@@ -1086,7 +1332,9 @@ namespace
                 if (!quitting)
                 {
                     Mark(L"closing user");
-                    hideToTray();
+                    Answer a = askClose();
+                    if (a == Answer::Exit) exitClean();
+                    else if (a == Answer::Tray) hideToTray();
                     return 0;
                 }
                 break;

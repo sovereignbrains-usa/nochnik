@@ -45,6 +45,7 @@ Name: "desktopicon"; Description: "Ярлык на рабочем столе"; G
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\fonts\OFL.txt"; DestDir: "{app}"; DestName: "Onest-OFL.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Ночник"; Filename: "{app}\Night.exe"

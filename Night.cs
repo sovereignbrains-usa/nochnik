@@ -205,7 +205,7 @@ namespace Night
             bad += Eq(sb, "mid-v", veil, 0);
             Look.Split(85, out strength, out veil);
             bad += Eq(sb, "deep-s", strength, 1);
-            bad += Eq(sb, "deep-v", veil, 0.25);
+            bad += Eq(sb, "deep-v", veil, Look.MaxVeil / 2);
             Look.Split(100, out strength, out veil);
             bad += Eq(sb, "max-s", strength, 1);
             bad += Eq(sb, "max-v", veil, Look.MaxVeil);
@@ -286,7 +286,7 @@ namespace Night
         public const double Green = 0.60;
         public const double Blue = 0.50;
         public const int Liked = 70;
-        public const double MaxVeil = 0.50;
+        public const double MaxVeil = 0.75;
 
         public static void Split(int dim, out double strength, out double veil)
         {

@@ -8,6 +8,7 @@
 #include "base.h"
 #include "config.h"
 #include "display.h"
+#include "layout.h"
 
 namespace night
 {
@@ -84,6 +85,56 @@ namespace night
         r.flag("key-mod-only", !Bind::fromVk(VK_CONTROL, Bind::Ctrl, modOnly), true);
         r.flag("key-letter-alone", Bind(0, 0x41).safeAlone(), false);
         r.flag("key-f9-alone", Bind(0, 0x78).safeAlone(), true);
+
+        // Настройки: круг «собрать — разобрать», зажим, мусор, BOM, запись на диск.
+        Config c;
+        c.dim = 42;
+        c.autostart = true;
+        c.keyToggle = Bind(Bind::Ctrl | Bind::Shift, VK_F7);
+        Config back = Config::parse(c.serialize());
+        r.one("cfg-dim", back.dim, 42);
+        r.flag("cfg-auto", back.autostart, true);
+        r.flag("cfg-key", back.keyToggle.same(c.keyToggle) && back.keyLighter.same(c.keyLighter), true);
+        r.one("cfg-clamp-hi", Config::parse("dim=900\n").dim, 100);
+        r.one("cfg-clamp-lo", Config::parse("dim=-5\n").dim, 0);
+        r.one("cfg-junk", Config::parse("dim=abc\n=\nпусто\nkey_toggle=zz\n\r\n").dim, Look::Liked);
+        r.flag("cfg-junk-key", Config::parse("key_toggle=zz\n").keyToggle.same(Config().keyToggle), true);
+        r.one("cfg-crlf", Config::parse("dim=33\r\nautostart=1\r\n").dim, 33);
+        r.one("cfg-bom", Config::parse("\xEF\xBB\xBF" "dim=12\n").dim, 12);
+        r.one("cfg-empty", Config::parse("").dim, Look::Liked);
+        {
+            wchar_t tmp[MAX_PATH] = {};
+            GetTempPathW(MAX_PATH, tmp);
+            std::wstring path = std::wstring(tmp) + L"night-check-config.txt";
+            bool saved = c.save(path);
+            Config disk = Config::load(path);
+            r.flag("cfg-disk", saved && disk.dim == 42 && disk.autostart, true);
+            r.flag("cfg-no-tmp", GetFileAttributesW((path + L".tmp").c_str()) == INVALID_FILE_ATTRIBUTES, true);
+            DeleteFileW(path.c_str());
+            r.one("cfg-missing", Config::load(path).dim, Look::Liked);
+        }
+
+        // Раскладка окна: всё внутри окна, карточки не налезают друг на друга, кнопки лежат в своей карточке.
+        {
+            using namespace layout;
+            const RECT win{0, 0, kWidth, kHeight};
+            const RECT cards[] = {kLevelCard, kAutoCard, kKeysCard};
+            bool inside = true, apart = true, keys = true;
+            for (const RECT& a : cards) inside = inside && Inside(a, win);
+            for (int i = 0; i < 3; i++)
+                for (int j = i + 1; j < 3; j++) apart = apart && !Overlap(cards[i], cards[j]);
+            for (int i = 0; i < 3; i++)
+            {
+                keys = keys && Inside(KeyButton(i), kKeysCard);
+                for (int j = i + 1; j < 3; j++) keys = keys && !Overlap(KeyButton(i), KeyButton(j));
+            }
+            r.flag("lay-cards-inside", inside, true);
+            r.flag("lay-cards-apart", apart, true);
+            r.flag("lay-keys", keys, true);
+            r.flag("lay-slider", Inside(kSlider, kLevelCard) && kSlider.right - kSlider.left > 2 * kSliderPad, true);
+            r.flag("lay-exit", Inside(kExit, win) && !Overlap(kExit, kKeysCard), true);
+            r.flag("lay-hit", In(kExit, kExit.left, kExit.top) && !In(kExit, kExit.right, kExit.top), true);
+        }
 
         unsigned short liked[768], plain[768], half[768], again[768];
         Gamma::Ramp(1, liked);

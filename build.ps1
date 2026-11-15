@@ -1,6 +1,6 @@
 ﻿# Сборка Ночника: rc + cl (MSVC), статический рантайм. Результат: build\Night.exe
-# Запуск: powershell -ExecutionPolicy Bypass -File build.ps1 [-NoCheck]
-param([switch]$NoCheck)
+# Запуск: powershell -ExecutionPolicy Bypass -File build.ps1 [-NoCheck] [-Analyze]
+param([switch]$NoCheck, [switch]$Analyze)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
@@ -32,5 +32,15 @@ if (-not $NoCheck) {
     $p = Start-Process build\Night.exe -ArgumentList '--check', "`"$out`"" -Wait -PassThru
     Get-Content $out
     if ($p.ExitCode) { throw '--check не прошёл' }
+}
+# Статический анализ MSVC по своим исходникам (шум из заголовков Windows SDK отсечён /analyze:external-).
+if ($Analyze) {
+    $obj = Join-Path $env:TEMP 'night-analyze'
+    New-Item -ItemType Directory -Force $obj | Out-Null
+    $log = cl /nologo /c /std:c++20 /EHsc /utf-8 /W4 /permissive- /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN `
+        /analyze /analyze:external- "/Fo$obj\" night.cpp base.cpp config.cpp display.cpp selfcheck.cpp startup.cpp 2>&1
+    $own = $log | Select-String '^(night|base|config|display|selfcheck|startup)\.(cpp|h)\(.*(warning|error)|\\nochnik\\.*\((\d+)\) : (warning|error)'
+    if ($own) { $own; throw 'анализ нашёл замечания' }
+    Write-Host 'анализ: замечаний нет'
 }
 Write-Host 'build\Night.exe готов'

@@ -36,6 +36,7 @@ namespace G = Gdiplus;
 #include "base.h"
 #include "config.h"
 #include "display.h"
+#include "layout.h"
 #include "selfcheck.h"
 
 using namespace night;
@@ -51,16 +52,28 @@ namespace
     constexpr UINT WM_QUITME = WM_APP + 4;
 
     constexpr UINT_PTR kTimer = 1;
-    constexpr int kDesignW = 420;
-    constexpr int kDesignH = 460;
 
     enum Hit { HitNone = -1, HitSlider = 0, HitAuto = 1, HitKey0 = 2, HitExit = 5 };
 
     const wchar_t* const kKeyTitles[3] = {L"Светлее", L"Темнее", L"Обычный экран"};
-    const wchar_t kKeyHelp[] = L"Щёлкни и нажми сочетание. Esc — отмена, Backspace — убрать.";
+    const wchar_t kKeyHelp[] = L"Щёлкните по кнопке и нажмите сочетание.\nEsc — отмена, Backspace — убрать.";
 
     // Цвета интерфейса.
     const G::Color cBg(255, 28, 28, 30);
+    const G::Color cCard(255, 38, 38, 42);
+    const G::Color cCardHot(255, 44, 44, 49);
+    const G::Color cCardLine(255, 58, 58, 64);
+    const G::Color cTrack(255, 66, 66, 72);
+    const G::Color cThumb(255, 240, 240, 242);
+    const G::Color cBtn(255, 50, 50, 56);
+    const G::Color cBtnHot(255, 62, 62, 69);
+    const G::Color cBtnDown(255, 44, 44, 50);
+    const G::Color cBtnLine(255, 78, 78, 86);
+    const G::Color cSwitchOff(255, 140, 140, 146);
+    const G::Color cSwitchOffHot(255, 190, 190, 196);
+    const G::Color cFgBright(255, 255, 255, 255);
+    const G::Color cRing(255, 232, 232, 234);
+    const G::Color cAccentHot(255, 244, 196, 136);
     const G::Color cFg(255, 232, 232, 234);
     const G::Color cMuted(255, 150, 150, 156);
     const G::Color cAccent(255, 232, 176, 112);
@@ -96,6 +109,8 @@ namespace
         int bar = Look::Liked;
         bool drag = false;
         int hover = HitNone;
+        int focus = HitNone;         // элемент с клавиатурным фокусом (порядок Tab = номера Hit)
+        bool focusVisible = false;   // кольцо рисуем только после Tab, а не после мыши
         int pressed = HitNone;
         bool trackingLeave = false;
 
@@ -114,7 +129,8 @@ namespace
         bool trayAdded = false;
         UINT taskbarCreated = 0;
 
-        std::unique_ptr<G::Font> fTitle, fSub, fBase, fBold, fValue, fSmall, fFoot;
+        std::unique_ptr<G::Font> fTitle, fSub, fBase, fBold, fValue, fSmall, fFoot, fLink, fLinkHot;
+        std::unique_ptr<G::Bitmap> iconBmp;
 
         // ---------------------------------------------------------------- создание
 
@@ -129,16 +145,19 @@ namespace
             taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
             const wchar_t* fam = L"Segoe UI";
-            auto mk = [&](float pt, bool bold) {
-                return std::make_unique<G::Font>(fam, pt * 96.0f / 72.0f, bold ? G::FontStyleBold : G::FontStyleRegular, G::UnitPixel);
+            auto mk = [&](float pt, bool bold, bool underline = false) {
+                int style = (bold ? G::FontStyleBold : G::FontStyleRegular) | (underline ? G::FontStyleUnderline : 0);
+                return std::make_unique<G::Font>(fam, pt * 96.0f / 72.0f, style, G::UnitPixel);
             };
-            fTitle = mk(16, true);
+            fTitle = mk(17, true);
             fSub = mk(9.5f, false);
             fBase = mk(10, false);
             fBold = mk(10, true);
-            fValue = mk(14, true);
+            fValue = mk(15, true);
             fSmall = mk(8.5f, false);
             fFoot = mk(9, false);
+            fLink = mk(10, false);
+            fLinkHot = mk(10, false, true);
 
             HICON big = LoadIconW(inst, MAKEINTRESOURCEW(1));
             HICON smallIcon = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
@@ -169,11 +188,23 @@ namespace
 
             dpi = GetDpiForWindow(hwnd);
             scale = dpi / 96.0;
+            loadIcon();
             layoutWindow();
             // Первый ShowWindow процесса берёт nCmdShow из STARTUPINFO (при запуске из ярлыка «свёрнуто»
             // окно застревало иконкой за краем экрана). Расходуем его на скрытое окно.
             ShowWindow(hwnd, SW_HIDE);
             return true;
+        }
+
+        // Значок в шапке: берём размер под текущий масштаб экрана, чтобы не размывался.
+        void loadIcon()
+        {
+            int px = (int)std::lround(32 * scale);
+            HICON ic = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, px, px, LR_DEFAULTCOLOR);
+            iconBmp.reset();
+            if (!ic) return;
+            iconBmp.reset(G::Bitmap::FromHICON(ic));
+            DestroyIcon(ic);
         }
 
         void start()
@@ -192,7 +223,7 @@ namespace
         void layoutWindow()
         {
             DWORD style = (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE);
-            RECT r{0, 0, (LONG)std::lround(kDesignW * scale), (LONG)std::lround(kDesignH * scale)};
+            RECT r{0, 0, (LONG)std::lround(layout::kWidth * scale), (LONG)std::lround(layout::kHeight * scale)};
             AdjustWindowRectExForDpi(&r, style, FALSE, 0, dpi);
             int w = r.right - r.left, h = r.bottom - r.top;
             MONITORINFO mi{sizeof mi};
@@ -298,7 +329,7 @@ namespace
             dirty = true;
             endCapture();
             if (!moved.empty()) note(moved);
-            if (keyBusy[target]) note(b.text() + L" уже занято другой программой. Выбери другое.");
+            if (keyBusy[target]) note(b.text() + L" уже занято другой программой. Выберите другое.");
         }
 
         // ---------------------------------------------------------------- показ окна
@@ -313,7 +344,7 @@ namespace
             // Размер «нормального» окна после странного запуска мог оказаться крошечным.
             RECT cr;
             GetClientRect(hwnd, &cr);
-            if (cr.right < (LONG)std::lround(kDesignW * scale) || cr.bottom < (LONG)std::lround(kDesignH * scale)) layoutWindow();
+            if (cr.right < (LONG)std::lround(layout::kWidth * scale) || cr.bottom < (LONG)std::lround(layout::kHeight * scale)) layoutWindow();
             MONITORINFO mi{sizeof mi};
             GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
             RECT wr, inter;
@@ -547,28 +578,28 @@ namespace
             G::Color col = cMuted;
             if (heldOff)
             {
-                text = cfg.keyToggle.empty() ? L"Обычный экран. Двинь полосу — вернётся тёплый."
+                text = cfg.keyToggle.empty() ? L"Обычный экран. Сдвиньте полосу, чтобы вернуть тёплый."
                                              : L"Обычный экран. " + cfg.keyToggle.text() + L" вернёт тёплый.";
             }
             else if (!gammaOk && dim > 0)
             {
-                text = L"Драйвер не взял гамму, держу только плёнку. Тепла нет.";
+                text = L"Видеодрайвер не принял цвет: экран только затемнён, без тёплого оттенка.";
                 col = cWarn;
             }
             else if (dim == 0) text = L"Выключено. Экран обычный.";
             else if (dim == Look::Liked)
             {
-                text = L"Тот тёплый, который зашёл.";
+                text = L"Рекомендуемый тёплый тон.";
                 col = cAccent;
             }
             else if (dim > Look::Liked)
             {
-                text = L"Темнее того самого. Цвет тот же, сверху плёнка.";
+                text = L"Темнее: тот же тёплый цвет, поверх него затемнение.";
                 col = cAccent;
             }
             else
             {
-                text = L"Светлее. Тот же цвет, слабее.";
+                text = L"Светлее: тёплый оттенок слабее.";
                 col = cAccent;
             }
             if (text != statusText || col.GetValue() != statusColor.GetValue())
@@ -668,31 +699,46 @@ namespace
             }
         }
 
-        // ---------------------------------------------------------------- геометрия (в 96-dpi единицах)
-
-        static RECT KeyRect(int i) { return RECT{190, 286 + i * 34, 400, 286 + i * 34 + 28}; }
-        static constexpr RECT SliderRect{10, 108, 410, 144};
-        static constexpr RECT AutoRect{20, 220, 300, 246};
-        static constexpr RECT ExitRect{320, 424, 400, 448};
-
-        static bool In(const RECT& r, int x, int y) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; }
+        // ---------------------------------------------------------------- геометрия (размеры — в layout.h)
 
         int hitTest(int px, int py) const
         {
             int x = (int)std::lround(px / scale), y = (int)std::lround(py / scale);
-            if (In(SliderRect, x, y)) return HitSlider;
-            if (In(AutoRect, x, y)) return HitAuto;
+            if (layout::In(layout::kSlider, x, y)) return HitSlider;
+            if (layout::In(layout::kAutoCard, x, y)) return HitAuto;
             for (int i = 0; i < 3; i++)
-                if (In(KeyRect(i), x, y)) return HitKey0 + i;
-            if (In(ExitRect, x, y)) return HitExit;
+                if (layout::In(layout::KeyButton(i), x, y)) return HitKey0 + i;
+            if (layout::In(layout::kExit, x, y)) return HitExit;
             return HitNone;
         }
 
+        static double SliderX1() { return layout::kSlider.left + layout::kSliderPad; }
+        static double SliderX2() { return layout::kSlider.right - layout::kSliderPad; }
+
         static int SliderValueAt(double x)
         {
-            double x1 = SliderRect.left + 10, x2 = SliderRect.right - 10;
-            double t = std::clamp((x - x1) / (x2 - x1), 0.0, 1.0);
+            double t = std::clamp((x - SliderX1()) / (SliderX2() - SliderX1()), 0.0, 1.0);
             return (int)std::nearbyint(t * 100.0);
+        }
+
+        // ---------------------------------------------------------------- действия и фокус
+
+        // Порядок Tab совпадает с номерами Hit: полоса, переключатель, три сочетания, «Выйти».
+        static constexpr int kFocusCount = 6;
+
+        void moveFocus(int dir)
+        {
+            if (focus < 0) focus = dir > 0 ? 0 : kFocusCount - 1;
+            else focus = (focus + dir + kFocusCount) % kFocusCount;
+            focusVisible = true;
+            invalidate();
+        }
+
+        void activate(int hit)
+        {
+            if (hit == HitAuto) setAutostart(!autoOn);
+            else if (hit >= HitKey0 && hit < HitKey0 + 3) beginCapture(hit - HitKey0);
+            else if (hit == HitExit) exitClean();
         }
 
         // ---------------------------------------------------------------- рисование
@@ -706,6 +752,63 @@ namespace
             fmt.SetTrimming(G::StringTrimmingNone);
             G::SolidBrush br(c);
             g.DrawString(s.c_str(), (INT)s.size(), &f, G::RectF(x, y, w, h), &fmt, &br);
+        }
+
+        static void RoundPath(G::GraphicsPath& p, float x, float y, float w, float h, float r)
+        {
+            float d = r * 2;
+            p.AddArc(x, y, d, d, 180, 90);
+            p.AddArc(x + w - d, y, d, d, 270, 90);
+            p.AddArc(x + w - d, y + h - d, d, d, 0, 90);
+            p.AddArc(x, y + h - d, d, d, 90, 90);
+            p.CloseFigure();
+        }
+
+        static void FillRound(G::Graphics& g, const G::Color& c, float x, float y, float w, float h, float r)
+        {
+            G::GraphicsPath p;
+            RoundPath(p, x, y, w, h, r);
+            G::SolidBrush b(c);
+            g.FillPath(&b, &p);
+        }
+
+        // Рамка шириной width, целиком внутри прямоугольника.
+        static void StrokeRound(G::Graphics& g, const G::Color& c, float width, float x, float y, float w, float h, float r)
+        {
+            G::GraphicsPath p;
+            float k = width / 2;
+            RoundPath(p, x + k, y + k, w - width, h - width, std::max(0.5f, r - k));
+            G::Pen pen(c, width);
+            g.DrawPath(&pen, &p);
+        }
+
+        static void Card(G::Graphics& g, const RECT& r, bool hot = false)
+        {
+            float x = (float)r.left, y = (float)r.top, w = (float)(r.right - r.left), h = (float)(r.bottom - r.top);
+            FillRound(g, hot ? cCardHot : cCard, x, y, w, h, 8);
+            StrokeRound(g, cCardLine, 1, x, y, w, h, 8);
+        }
+
+        // Кольцо клавиатурного фокуса снаружи прямоугольника.
+        static void Ring(G::Graphics& g, float x, float y, float w, float h, float r)
+        {
+            StrokeRound(g, cRing, 2, x - 4, y - 4, w + 8, h + 8, r + 4);
+        }
+
+        static void Switch(G::Graphics& g, float x, float y, bool on, bool hot)
+        {
+            if (on)
+            {
+                FillRound(g, hot ? cAccentHot : cAccent, x, y, 40, 20, 10);
+                G::SolidBrush knob(cBg);
+                g.FillEllipse(&knob, x + 24, y + 4, 12.0f, 12.0f);
+            }
+            else
+            {
+                StrokeRound(g, hot ? cSwitchOffHot : cSwitchOff, 1.5f, x, y, 40, 20, 10);
+                G::SolidBrush knob(hot ? cSwitchOffHot : cSwitchOff);
+                g.FillEllipse(&knob, x + 5, y + 5, 10.0f, 10.0f);
+            }
         }
 
         void paint(HDC hdc, int w, int h)
@@ -727,63 +830,103 @@ namespace
             DeleteDC(mem);
         }
 
+        // Снимок окна в PNG (--render): проверка внешнего вида без экрана.
+        bool renderPng(const std::wstring& path)
+        {
+            G::Bitmap bmp((INT)std::lround(layout::kWidth * scale), (INT)std::lround(layout::kHeight * scale), PixelFormat32bppRGB);
+            {
+                G::Graphics g(&bmp);
+                g.SetSmoothingMode(G::SmoothingModeAntiAlias);
+                g.SetTextRenderingHint(G::TextRenderingHintClearTypeGridFit);
+                g.ScaleTransform((G::REAL)scale, (G::REAL)scale);
+                g.Clear(cBg);
+                draw(g);
+            }
+            UINT n = 0, bytes = 0;
+            G::GetImageEncodersSize(&n, &bytes);
+            if (!n || !bytes) return false;
+            std::vector<char> buf(bytes);
+            auto* enc = reinterpret_cast<G::ImageCodecInfo*>(buf.data());
+            G::GetImageEncoders(n, bytes, enc);
+            for (UINT i = 0; i < n; i++)
+                if (wcscmp(enc[i].MimeType, L"image/png") == 0) return bmp.Save(path.c_str(), &enc[i].Clsid, nullptr) == G::Ok;
+            return false;
+        }
+
         void draw(G::Graphics& g)
         {
+            using namespace layout;
             const auto Near = G::StringAlignmentNear;
             const auto Center = G::StringAlignmentCenter;
             const auto Far = G::StringAlignmentFar;
+            auto focused = [&](int hit) { return focusVisible && focus == hit; };
 
-            T(g, L"Ночник", *fTitle, 20, 14, 380, 28, cFg);
-            T(g, L"Тёплый свет не трогаю. Крутится тусклость.", *fSub, 20, 44, 380, 22, cMuted);
-            T(g, L"Тусклость", *fBase, 20, 78, 180, 24, cFg);
-            T(g, std::to_wstring(dim), *fValue, 200, 74, 200, 28, cAccent, Far, Center);
+            // Шапка.
+            if (iconBmp) g.DrawImage(iconBmp.get(), 24.0f, 16.0f, 32.0f, 32.0f);
+            T(g, L"Ночник", *fTitle, 68, 10, 330, 28, cFg);
+            T(g, L"Тёплый свет для экрана по вечерам", *fSub, 68, 38, 330, 20, cMuted);
 
-            // Полоса.
+            // Тусклость.
+            Card(g, kLevelCard);
+            T(g, L"Тусклость", *fBase, 32, 78, 180, 24, cFg);
+            T(g, std::to_wstring(dim), *fValue, 200, 72, 188, 30, cAccent, Far, Center);
             {
-                float x1 = SliderRect.left + 10.0f, x2 = SliderRect.right - 10.0f;
-                float cy = SliderRect.top + (SliderRect.bottom - SliderRect.top) / 2.0f;
-                G::SolidBrush track(G::Color(255, 58, 58, 62));
-                g.FillRectangle(&track, x1, cy - 2, x2 - x1, 4.0f);
+                float x1 = (float)SliderX1(), x2 = (float)SliderX2();
+                float cy = kSlider.top + (kSlider.bottom - kSlider.top) / 2.0f;
                 float tx = x1 + (x2 - x1) * (bar / 100.0f);
-                G::SolidBrush fill(cAccent);
-                g.FillRectangle(&fill, x1, cy - 2, std::max(1.0f, tx - x1), 4.0f);
-                g.FillEllipse(&fill, tx - 7.0f, cy - 7.0f, 14.0f, 14.0f);
+                FillRound(g, cTrack, x1, cy - 2, x2 - x1, 4, 2);
+                if (tx - x1 >= 1.0f) FillRound(g, cAccent, x1, cy - 2, tx - x1, 4, 2);
+
                 float mx = x1 + (x2 - x1) * (Look::Liked / 100.0f);
-                G::Pen mark(G::Color(255, 220, 220, 224), 1.5f);
-                g.DrawLine(&mark, mx, cy - 11, mx, cy - 6);
-            }
-            T(g, L"светлее", *fSmall, 20, 146, 160, 18, cMuted);
-            T(g, L"темнее", *fSmall, 240, 146, 160, 18, cMuted, Far);
+                G::Pen mark(cMuted, 1.5f);
+                mark.SetStartCap(G::LineCapRound);
+                mark.SetEndCap(G::LineCapRound);
+                g.DrawLine(&mark, mx, cy - 17, mx, cy - 12);
 
-            T(g, statusText, *fSub, 20, 172, 380, 44, statusColor);
-
-            // Галка автозапуска.
-            {
-                bool hov = hover == HitAuto;
-                float bx = 20, by = 224.5f, bs = 16;
-                G::SolidBrush bg(hov ? G::Color(255, 52, 52, 58) : G::Color(255, 40, 40, 44));
-                g.FillRectangle(&bg, bx, by, bs, bs);
-                G::Pen border(autoOn ? cAccent : G::Color(255, 110, 110, 116), 1.0f);
-                g.DrawRectangle(&border, bx + 0.5f, by + 0.5f, bs - 1, bs - 1);
-                if (autoOn)
+                bool hot = drag || hover == HitSlider;
+                G::SolidBrush rim(cThumb);
+                g.FillEllipse(&rim, tx - 9, cy - 9, 18.0f, 18.0f);
+                float ri = drag ? 4.0f : hot ? 6.5f : 5.5f;
+                G::SolidBrush core(hot ? cAccentHot : cAccent);
+                g.FillEllipse(&core, tx - ri, cy - ri, ri * 2, ri * 2);
+                if (focused(HitSlider))
                 {
-                    G::SolidBrush on(cAccent);
-                    g.FillRectangle(&on, bx + 3, by + 3, bs - 6, bs - 6);
+                    G::Pen ring(cRing, 2.0f);
+                    g.DrawEllipse(&ring, tx - 13, cy - 13, 26.0f, 26.0f);
                 }
-                T(g, L"Запускать вместе с Windows", *fBase, 44, 222, 260, 22, cFg, Near, Center);
+            }
+            T(g, L"светлее", *fSmall, 32, 144, 160, 18, cMuted);
+            T(g, L"темнее", *fSmall, 228, 144, 160, 18, cMuted, Far);
+            T(g, statusText, *fSub, 32, 168, 356, 36, statusColor);
+
+            // Автозапуск.
+            {
+                Card(g, kAutoCard, hover == HitAuto);
+                float h = (float)(kAutoCard.bottom - kAutoCard.top);
+                T(g, L"Запускать вместе с Windows", *fBase, 32, (float)kAutoCard.top, 300, h, cFg, Near, Center);
+                Switch(g, kAutoCard.right - 16.0f - 40, kAutoCard.top + (h - 20) / 2, autoOn, hover == HitAuto);
+                if (focused(HitAuto))
+                    Ring(g, (float)kAutoCard.left, (float)kAutoCard.top, (float)(kAutoCard.right - kAutoCard.left), h, 8);
             }
 
-            T(g, L"Горячие клавиши", *fBold, 20, 258, 380, 22, cFg);
+            // Горячие клавиши.
+            T(g, L"Горячие клавиши", *fBold, 20, 272, 380, 20, cFg);
+            Card(g, kKeysCard);
             for (int i = 0; i < 3; i++)
             {
-                RECT r = KeyRect(i);
-                T(g, kKeyTitles[i], *fBase, 20, (float)r.top + 4, 170, 22, cFg);
+                int rowTop = kKeysCard.top + i * kKeyRow;
+                if (i > 0)
+                {
+                    G::Pen line(cCardLine, 1.0f);
+                    g.DrawLine(&line, 32.0f, (float)rowTop, (float)(kKeysCard.right - 16), (float)rowTop);
+                }
+                T(g, kKeyTitles[i], *fBase, 32, (float)rowTop, 190, (float)kKeyRow, cFg, Near, Center);
 
                 std::wstring text;
                 G::Color fg = cFg;
                 if (capture == i)
                 {
-                    text = L"Нажми сочетание…";
+                    text = L"Нажмите сочетание…";
                     fg = cAccent;
                 }
                 else
@@ -797,25 +940,27 @@ namespace
                         fg = cWarn;
                     }
                 }
-                bool isDown = pressed == HitKey0 + i && hover == pressed;
-                G::Color fillc = isDown ? G::Color(255, 60, 60, 66) : hover == HitKey0 + i ? G::Color(255, 52, 52, 58) : G::Color(255, 40, 40, 44);
-                G::Color bord = capture == i ? cAccent : G::Color(255, 70, 70, 76);
-                G::SolidBrush fb(fillc);
+                RECT r = KeyButton(i);
                 float bw = (float)(r.right - r.left), bh = (float)(r.bottom - r.top);
-                g.FillRectangle(&fb, (float)r.left, (float)r.top, bw, bh);
-                G::Pen bp(bord, 1.0f);
-                g.DrawRectangle(&bp, r.left + 0.5f, r.top + 0.5f, bw - 1, bh - 1);
+                bool isDown = pressed == HitKey0 + i && hover == pressed;
+                G::Color fillc = isDown ? cBtnDown : hover == HitKey0 + i ? cBtnHot : cBtn;
+                FillRound(g, fillc, (float)r.left, (float)r.top, bw, bh, 6);
+                StrokeRound(g, capture == i ? cAccent : cBtnLine, 1, (float)r.left, (float)r.top, bw, bh, 6);
                 T(g, text, *fBase, (float)r.left, (float)r.top, bw, bh, fg, Center, Center);
+                if (focused(HitKey0 + i)) Ring(g, (float)r.left, (float)r.top, bw, bh, 6);
             }
 
             bool shown = noteActive();
-            T(g, shown ? keyNote : std::wstring(kKeyHelp), *fSmall, 20, 390, 380, 34, shown ? cWarn : cMuted);
+            T(g, shown ? keyNote : std::wstring(kKeyHelp), *fSmall, 20, 410, 380, 34, shown ? cWarn : cMuted);
 
-            T(g, L"Крестик прячет в трей.", *fFoot, 20, 428, 220, 22, cMuted);
+            // Низ окна.
+            T(g, L"Крестик прячет в трей.", *fFoot, 20, 452, 280, 22, cMuted, Near, Center);
             {
-                const wchar_t* s = L"Выйти";
-                G::Font f(L"Segoe UI", 10.0f * 96.0f / 72.0f, hover == HitExit ? G::FontStyleUnderline : G::FontStyleRegular, G::UnitPixel);
-                T(g, s, f, 320, 426, 80, 22, hover == HitExit ? G::Color(255, 255, 255, 255) : cAccent, Far, Near);
+                bool hot = hover == HitExit;
+                T(g, L"Выйти", hot ? *fLinkHot : *fLink, (float)kExit.left, (float)kExit.top, (float)(kExit.right - kExit.left),
+                  (float)(kExit.bottom - kExit.top), hot ? cFgBright : cAccent, Far, Center);
+                if (focused(HitExit))
+                    Ring(g, kExit.right - 52.0f, (float)kExit.top + 2, 56.0f, (float)(kExit.bottom - kExit.top) - 4, 6);
             }
         }
 
@@ -889,6 +1034,7 @@ namespace
             {
                 dpi = HIWORD(wp);
                 scale = dpi / 96.0;
+                loadIcon();
                 const RECT* r = (const RECT*)lp;
                 SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
                 invalidate();
@@ -972,8 +1118,14 @@ namespace
                     int step = GetKeyState(VK_SHIFT) < 0 ? 5 : 1;
                     switch (wp)
                     {
-                    case VK_LEFT: nudge(-step); return 0;
-                    case VK_RIGHT: nudge(step); return 0;
+                    case VK_LEFT: case VK_DOWN: nudge(-step); return 0;
+                    case VK_RIGHT: case VK_UP: nudge(step); return 0;
+                    case VK_PRIOR: nudge(10); return 0;
+                    case VK_NEXT: nudge(-10); return 0;
+                    case VK_TAB: moveFocus(GetKeyState(VK_SHIFT) < 0 ? -1 : 1); return 0;
+                    case VK_SPACE: case VK_RETURN:
+                        if (!(lp & (1 << 30))) activate(focus); // повтор при удержании не считаем
+                        return 0;
                     case VK_HOME: setDim(0); return 0;
                     case VK_END: setDim(100); return 0;
                     case VK_ESCAPE: hideToTray(); return 0;
@@ -1011,6 +1163,8 @@ namespace
                 SetFocus(h);
                 SetCapture(h);
                 pressed = hit;
+                focus = hit;
+                focusVisible = false;
                 if (hit == HitSlider)
                 {
                     drag = true;
@@ -1054,9 +1208,7 @@ namespace
                 ReleaseCapture();
                 if (hit != HitNone && hit == was)
                 {
-                    if (hit == HitAuto) setAutostart(!autoOn);
-                    else if (hit >= HitKey0 && hit < HitKey0 + 3) beginCapture(hit - HitKey0);
-                    else if (hit == HitExit) exitClean();
+                    activate(hit);
                 }
                 invalidate();
                 return 0;
@@ -1121,7 +1273,7 @@ namespace
     }
 }
 
-int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
+int WINAPI wWinMain(_In_ HINSTANCE inst, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int)
 {
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -1143,7 +1295,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
 
     SetUnhandledExceptionFilter(CrashFilter);
 
-    bool checkUi = HasArg(argc, argv, L"--check-ui");
+    std::wstring renderPath = ArgAfter(argc, argv, L"--render"); // снимок окна в PNG: --render файл.png [--dim N] [--focus N] [--hover N] [--capture N]
+    bool checkUi = HasArg(argc, argv, L"--check-ui") || !renderPath.empty();
     bool background = HasArg(argc, argv, L"--background");
     if (!checkUi && !background)
     {
@@ -1156,8 +1309,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
     if (!checkUi)
     {
         mutex = CreateMutexW(nullptr, FALSE, kMutexName);
-        DWORD wait = WaitForSingleObject(mutex, 0);
-        if (wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
+        // Не удалось создать замок — работаем без защиты от второй копии, чем не запускаться вовсе.
+        DWORD wait = mutex ? WaitForSingleObject(mutex, 0) : WAIT_OBJECT_0;
+        if (mutex && wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED)
         {
             HWND w = FindMain(20);
             AllowSetForegroundWindow(ASFW_ANY);
@@ -1182,6 +1336,21 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int)
         {
             Mark(L"window-create-failed");
             code = 1;
+        }
+        else if (!renderPath.empty())
+        {
+            auto num = [&](const wchar_t* name, int fallback) {
+                int v;
+                return ParseInt(ArgAfter(argc, argv, name), v) ? v : fallback;
+            };
+            app.dim = app.bar = std::clamp(num(L"--dim", Look::Liked), 0, 100);
+            app.focus = num(L"--focus", HitNone);
+            app.focusVisible = app.focus != HitNone;
+            app.hover = num(L"--hover", HitNone);
+            app.capture = num(L"--capture", -1);
+            app.refreshTexts();
+            code = app.renderPng(renderPath) ? 0 : 1;
+            DestroyWindow(app.hwnd);
         }
         else if (checkUi)
         {

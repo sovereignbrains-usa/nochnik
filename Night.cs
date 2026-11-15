@@ -929,8 +929,49 @@ namespace Night
             WindowState = FormWindowState.Normal;
             TopMost = true;
             Show();
+            BringBack();
             Activate();
             RaiseAboveVeil();
+        }
+
+        [DllImport("user32.dll")]
+        static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        static extern bool ShowWindow(IntPtr hWnd, int cmd);
+
+        [DllImport("user32.dll")]
+        static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        Size _designClient;
+
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            _designClient = ClientSize;
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            if (_allowShow) BringBack();
+        }
+
+        // Запуск со «свёрнутым» STARTUPINFO оставляет окно иконкой за краем
+        // экрана, а размер «нормального» окна — крошечным. Возвращаем как задумано.
+        void BringBack()
+        {
+            if (!IsHandleCreated) return;
+            if (IsIconic(Handle)) ShowWindow(Handle, 9);
+            if (_designClient.Width > 0 &&
+                (ClientSize.Width < _designClient.Width || ClientSize.Height < _designClient.Height))
+            {
+                ClientSize = _designClient;
+                CenterToScreen();
+            }
+            Rectangle work = Screen.FromControl(this).WorkingArea;
+            if (!work.IntersectsWith(Bounds)) CenterToScreen();
+            SetForegroundWindow(Handle);
         }
 
         public void ExitClean()

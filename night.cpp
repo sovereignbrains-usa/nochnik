@@ -61,7 +61,7 @@ namespace
     enum Hit { HitNone = -1, HitSlider = 0, HitAuto = 1, HitKey0 = 2 };
 
     const wchar_t* const kKeyTitles[3] = {L"Светлее", L"Темнее", L"Обычный экран"};
-    const wchar_t kKeyHelp[] = L"Щёлкните по кнопке и нажмите сочетание.\nEsc — отмена, Backspace — убрать.";
+    const wchar_t kKeyHelp[] = L"Щёлкните по полю и нажмите сочетание.\nEsc — отмена, Backspace — убрать.";
 
     // Цвета интерфейса.
     const G::Color cBg(255, 28, 28, 30);
@@ -81,6 +81,7 @@ namespace
     const G::Color cAccentHot(255, 244, 196, 136);
     const G::Color cFg(255, 232, 232, 234);
     const G::Color cMuted(255, 150, 150, 156);
+    const G::Color cHint(255, 188, 188, 194);
     const G::Color cAccent(255, 232, 176, 112);
     const G::Color cWarn(255, 255, 170, 130);
 
@@ -183,8 +184,8 @@ namespace
             fBase = mk(10, false);
             fBold = mk(10, true);
             fValue = mk(15, true);
-            fSmall = mk(8.5f, false);
-            fFoot = mk(9, false);
+            fSmall = mk(9, false);
+            fFoot = mk(9.5f, false);
 
             HICON big = LoadIconW(inst, MAKEINTRESOURCEW(1));
             HICON smallIcon = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
@@ -1040,11 +1041,12 @@ namespace
             g.DrawPath(&pen, &p);
         }
 
-        static void Card(G::Graphics& g, const RECT& r, bool hot = false)
+        static void Card(G::Graphics& g, const RECT& r, bool hot = false, bool frame = true, bool fill = true)
         {
+            if (!fill && !hot) return;
             float x = (float)r.left, y = (float)r.top, w = (float)(r.right - r.left), h = (float)(r.bottom - r.top);
             FillRound(g, hot ? cCardHot : cCard, x, y, w, h, 8);
-            StrokeRound(g, cCardLine, 1, x, y, w, h, 8);
+            if (frame) StrokeRound(g, cCardLine, 1, x, y, w, h, 8);
         }
 
         // Кольцо клавиатурного фокуса снаружи прямоугольника.
@@ -1149,6 +1151,8 @@ namespace
                 g.DrawLine(&mark, mx, cy - 17, mx, cy - 12);
 
                 bool hot = drag || hover == HitSlider;
+                G::SolidBrush glow(G::Color(hot ? 96 : 52, cAccent.GetR(), cAccent.GetG(), cAccent.GetB()));
+                g.FillEllipse(&glow, tx - 14, cy - 14, 28.0f, 28.0f);
                 G::SolidBrush rim(cThumb);
                 g.FillEllipse(&rim, tx - 9, cy - 9, 18.0f, 18.0f);
                 float ri = drag ? 4.0f : hot ? 6.5f : 5.5f;
@@ -1160,13 +1164,13 @@ namespace
                     g.DrawEllipse(&ring, tx - 13, cy - 13, 26.0f, 26.0f);
                 }
             }
-            T(g, L"светлее", *fSmall, 32, 144, 160, 18, cMuted);
-            T(g, L"темнее", *fSmall, 228, 144, 160, 18, cMuted, Far);
+            T(g, L"светлее", *fSmall, 32, 144, 160, 18, cHint);
+            T(g, L"темнее", *fSmall, 228, 144, 160, 18, cHint, Far);
             T(g, statusText, *fSub, 32, 168, 356, 36, statusColor);
 
-            // Автозапуск.
+            // Автозапуск — строка без карточки. Заливка только под курсором.
             {
-                Card(g, kAutoCard, hover == HitAuto);
+                Card(g, kAutoCard, hover == HitAuto, false, false);
                 float h = (float)(kAutoCard.bottom - kAutoCard.top);
                 T(g, L"Запускать вместе с Windows", *fBase, 32, (float)kAutoCard.top, 300, h, cFg, Near, Center);
                 Switch(g, kAutoCard.right - 16.0f - 40, kAutoCard.top + (h - 20) / 2, autoOn, hover == HitAuto);
@@ -1176,7 +1180,7 @@ namespace
 
             // Горячие клавиши.
             T(g, L"Горячие клавиши", *fBold, 20, 272, 380, 20, cFg);
-            Card(g, kKeysCard);
+            Card(g, kKeysCard, false, false);
             for (int i = 0; i < 3; i++)
             {
                 int rowTop = kKeysCard.top + i * kKeyRow;
@@ -1198,7 +1202,7 @@ namespace
                 {
                     const Bind& b = keyOf(i);
                     text = b.text();
-                    if (b.empty()) fg = cMuted;
+                    if (b.empty()) fg = cHint;
                     else if (keyBusy[i])
                     {
                         text += L" — занято";
@@ -1207,19 +1211,36 @@ namespace
                 }
                 RECT r = KeyButton(i);
                 float bw = (float)(r.right - r.left), bh = (float)(r.bottom - r.top);
+                bool hotKey = hover == HitKey0 + i;
                 bool isDown = pressed == HitKey0 + i && hover == pressed;
-                G::Color fillc = isDown ? cBtnDown : hover == HitKey0 + i ? cBtnHot : cBtn;
+                G::Color fillc = cCard;
+                G::Color linec = cCardLine;
+                if (capture == i)
+                {
+                    fillc = G::Color(255, 54, 46, 38);
+                    linec = cAccent;
+                }
+                else if (isDown)
+                {
+                    fillc = cBtnDown;
+                    linec = cBtnLine;
+                }
+                else if (hotKey)
+                {
+                    fillc = cCardHot;
+                    linec = cBtnLine;
+                }
                 FillRound(g, fillc, (float)r.left, (float)r.top, bw, bh, 6);
-                StrokeRound(g, capture == i ? cAccent : cBtnLine, 1, (float)r.left, (float)r.top, bw, bh, 6);
+                StrokeRound(g, linec, 1, (float)r.left, (float)r.top, bw, bh, 6);
                 T(g, text, *fBase, (float)r.left, (float)r.top, bw, bh, fg, Center, Center);
                 if (focused(HitKey0 + i)) Ring(g, (float)r.left, (float)r.top, bw, bh, 6);
             }
 
             bool shown = noteActive();
-            T(g, shown ? keyNote : std::wstring(kKeyHelp), *fSmall, 20, 410, 380, 34, shown ? cWarn : cMuted);
+            T(g, shown ? keyNote : std::wstring(kKeyHelp), *fSmall, 20, 410, 380, 36, shown ? cWarn : cHint);
 
             // Низ окна.
-            T(g, L"Свернуть прячет в трей, крестик закрывает Ночник.", *fFoot, 20, 452, 380, 22, cMuted, Near, Center);
+            T(g, L"Свернуть прячет в трей, крестик закрывает Ночник.", *fFoot, 20, 452, 380, 22, cHint, Near, Center);
         }
 
         // ---------------------------------------------------------------- таймер и события

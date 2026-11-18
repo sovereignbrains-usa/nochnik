@@ -55,6 +55,8 @@ namespace
     constexpr UINT WM_QUITME = WM_APP + 4;
 
     constexpr UINT_PTR kTimer = 1;
+    constexpr ULONGLONG kApplyGap = 50;     // ползунок не дёргает гамму чаще, мс
+    constexpr ULONGLONG kGammaRetry = 2000; // повтор, если драйвер отверг рампу, мс
 
     enum Hit { HitNone = -1, HitSlider = 0, HitAuto = 1, HitKey0 = 2 };
 
@@ -101,6 +103,8 @@ namespace
         int shownDim = INT_MIN;
         std::atomic<int> force{0};
         ULONGLONG lastSave = 0;
+        ULONGLONG lastApply = 0;
+        ULONGLONG gammaRetryAt = 0;
         bool heldOff = false;
         bool keyOn[3] = {};
         bool keyBusy[3] = {};
@@ -392,10 +396,14 @@ namespace
             ShowWindow(hwnd, SW_HIDE);
         }
 
+        // Поверх всех окон только пока видна плёнка: иначе окно сидит в обычном порядке.
         void raiseAboveVeil()
         {
             if (!IsWindowVisible(hwnd)) return;
-            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            bool veilUp = false;
+            for (const Veil& v : veils)
+                if (v.hwnd && IsWindowVisible(v.hwnd)) { veilUp = true; break; }
+            SetWindowPos(hwnd, veilUp ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
 
         void exitClean()
@@ -648,7 +656,9 @@ namespace
             dim = bar;
             heldOff = false;
             dirty = true;
-            applyNow(true);
+            // Пока тянут ползунок, гамму пишем не чаще kApplyGap. Отпускание и таймер догоняют.
+            ULONGLONG now = GetTickCount64();
+            if (!(drag && now - lastApply < kApplyGap)) applyNow(true);
             refreshTexts();
         }
 
@@ -664,16 +674,21 @@ namespace
         void applyNow(bool forced)
         {
             if (quitting) return;
+            ULONGLONG now = GetTickCount64();
             int d = effectiveDim();
-            if (!forced && d == shownDim && appliedOk) return;
+            // Отказ драйвера не считаем успехом: повторяем сами, но не чаще kGammaRetry.
+            // Сдвиг ползунка и смена экрана (forced) пробуют сразу.
+            if (!forced && d == shownDim && (appliedOk || now < gammaRetryAt)) return;
 
             double strength, veil;
             Look::Split(d, strength, veil);
             bool ok = Gamma::Apply(strength);
+            lastApply = now;
 
             shownDim = d;
             gammaOk = ok;
-            appliedOk = ok || d == 0;
+            appliedOk = ok;
+            gammaRetryAt = ok ? 0 : now + kGammaRetry;
 
             if (d == 0)
             {
@@ -684,7 +699,6 @@ namespace
             {
                 Gamma::Identity();
                 cover(d / 100.0 * Look::MaxVeil);
-                appliedOk = true;
                 return;
             }
             if (veil >= 0.02) cover(veil);
@@ -708,23 +722,20 @@ namespace
                 hideVeils();
                 return;
             }
-            wchar_t head[32];
-            swprintf_s(head, L"%.2f|", opacity);
-            std::wstring key = head;
+            // Ключ — только геометрия. Прозрачность place() меняет у уже живого окна,
+            // иначе каждый шаг ползунка выше 70 уничтожает плёнку и на кадр гасит её.
+            std::wstring key;
             for (const RECT& r : mons)
                 key += std::to_wstring(r.left) + L"," + std::to_wstring(r.top) + L"," + std::to_wstring(r.right - r.left) + L"," +
                        std::to_wstring(r.bottom - r.top) + L";";
             if (key != veilKey || veils.size() != mons.size())
             {
-                hideVeils();
+                for (Veil& v : veils) v.destroy();
+                veils.clear();
                 veilKey = key;
                 veils.resize(mons.size());
-                for (size_t i = 0; i < mons.size(); i++) veils[i].place(mons[i], opacity);
             }
-            else
-            {
-                for (size_t i = 0; i < mons.size(); i++) veils[i].place(mons[i], opacity);
-            }
+            for (size_t i = 0; i < mons.size(); i++) veils[i].place(mons[i], opacity);
             raiseAboveVeil();
         }
 
@@ -733,6 +744,7 @@ namespace
             for (Veil& v : veils) v.destroy();
             veils.clear();
             veilKey.clear();
+            raiseAboveVeil();
         }
 
         // ---------------------------------------------------------------- сохранение
@@ -1451,9 +1463,12 @@ namespace
             {
                 int hit = hitTest(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
                 int was = pressed;
+                bool wasDrag = drag;
                 pressed = HitNone;
                 drag = false;
                 ReleaseCapture();
+                // Последние шаги ползунка могли не дойти до гаммы из-за паузы kApplyGap.
+                if (wasDrag) applyNow(true);
                 if (hit != HitNone && hit == was)
                 {
                     activate(hit);

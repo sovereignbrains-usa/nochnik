@@ -85,9 +85,6 @@ namespace
     const G::Color cHint(255, 188, 188, 194);
     const G::Color cAccent(255, 232, 176, 112);
     const G::Color cWarn(255, 255, 170, 130);
-    // Подсветка крестика: пыльная, не системный красный.
-    const G::Color cCloseHot(255, 122, 56, 60);
-    const G::Color cCloseDown(255, 148, 64, 68);
 
     inline COLORREF Rgb(const G::Color& c) { return RGB(c.GetR(), c.GetG(), c.GetB()); }
 
@@ -215,7 +212,8 @@ namespace
             vc.lpszClassName = kVeilClass;
             RegisterClassExW(&vc);
 
-            hwnd = CreateWindowExW(0, kMainClass, L"Ночник", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+            // Без WS_SYSMENU DWM не рисует системный крестик и подсказку «Закрыть».
+            hwnd = CreateWindowExW(0, kMainClass, L"Ночник", WS_OVERLAPPED | WS_CAPTION | WS_MINIMIZEBOX,
                                    CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr, inst, this);
             if (!hwnd) return false;
 
@@ -594,6 +592,13 @@ namespace
                 if (was >= 0 && hit == was) finish((Answer)hit);
                 return 0;
             }
+            case WM_SYSKEYDOWN:
+                if (wp == VK_F4)
+                {
+                    if (!(lp & (1 << 30))) SendMessageW(h, WM_CLOSE, 0, 0);
+                    return 0;
+                }
+                break;
             case WM_KEYDOWN:
                 switch (wp)
                 {
@@ -639,7 +644,8 @@ namespace
 
             Dialog d;
             dlg = &d;
-            const DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU, ex = WS_EX_TOPMOST;
+            // Тоже без WS_SYSMENU: иначе у диалога остаётся системный крестик.
+            const DWORD style = WS_POPUP | WS_CAPTION, ex = WS_EX_TOPMOST;
             RECT r{0, 0, (LONG)std::lround(layout::kAskWidth * scale), (LONG)std::lround(layout::kAskHeight * scale)};
             AdjustWindowRectExForDpi(&r, style, FALSE, ex, dpi);
             int w = r.right - r.left, h = r.bottom - r.top;
@@ -1163,7 +1169,8 @@ namespace
             DwmSetWindowAttribute(w, kCornerPref, &round, sizeof round);
         }
 
-        // Клиент накрывает системную шапку: кнопки рисуем сами, без красной заливки DWM.
+        // Клиент накрывает полосу шапки. Системные кнопки снимает отсутствие WS_SYSMENU:
+        // NCCALCSIZE их не убирает, DWM всё равно держит зону крестика.
         static LRESULT coverCaption(HWND w, WPARAM wp, LPARAM lp)
         {
             auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
@@ -1246,8 +1253,7 @@ namespace
                 if (hot)
                 {
                     bool deep = held == id;
-                    G::Color fill = close ? (deep ? cCloseDown : cCloseHot) : (deep ? cBtnDown : cBtnHot);
-                    FillRound(g, fill, r.X, r.Y, r.Width, r.Height, r.Height / 2.f);
+                    FillRound(g, deep ? cBtnDown : cBtnHot, r.X, r.Y, r.Width, r.Height, r.Height / 2.f);
                 }
                 float cx = r.X + r.Width / 2.f, cy = r.Y + r.Height / 2.f;
                 G::Pen pen(hot ? cFg : cHint, 1.5f);
@@ -1569,6 +1575,12 @@ namespace
 
             case WM_SYSKEYDOWN:
             case WM_KEYDOWN:
+                // Без WS_SYSMENU Alt+F4 больше не приходит как SC_CLOSE.
+                if (msg == WM_SYSKEYDOWN && wp == VK_F4)
+                {
+                    if (!(lp & (1 << 30))) SendMessageW(h, WM_CLOSE, 0, 0);
+                    return 0;
+                }
                 if (capture >= 0)
                 {
                     captureKey((UINT)wp);
@@ -1868,12 +1880,32 @@ int WINAPI wWinMain(_In_ HINSTANCE inst, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ in
         }
         else if (checkUi)
         {
-            RECT cr;
+            // За экраном: DWM считает кнопки шапки только у показанного окна.
+            SetWindowPos(app.hwnd, nullptr, -32000, -32000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            ShowWindow(app.hwnd, SW_SHOWNOACTIVATE);
+            for (int i = 0; i < 20; ++i)
+            {
+                MSG pump;
+                while (PeekMessageW(&pump, nullptr, 0, 0, PM_REMOVE))
+                {
+                    TranslateMessage(&pump);
+                    DispatchMessageW(&pump);
+                }
+                Sleep(15);
+            }
+            RECT cr{};
             GetClientRect(app.hwnd, &cr);
-            char buf[96];
-            snprintf(buf, sizeof buf, "ui-ok %llu %ldx%ld", (unsigned long long)(UINT_PTR)app.hwnd, cr.right, cr.bottom);
+            RECT buttons{};
+            HRESULT hr = DwmGetWindowAttribute(app.hwnd, DWMWA_CAPTION_BUTTON_BOUNDS, &buttons, sizeof buttons);
+            long bw = buttons.right - buttons.left;
+            char buf[192];
+            snprintf(buf, sizeof buf, "ui-ok %llu %ldx%ld buttons %ld,%ld-%ld,%ld (%ldx%ld) hr=0x%08lx",
+                     (unsigned long long)(UINT_PTR)app.hwnd, (long)cr.right, (long)cr.bottom,
+                     buttons.left, buttons.top, buttons.right, buttons.bottom,
+                     bw, buttons.bottom - buttons.top, (unsigned long)hr);
             WriteFileUtf8(TempFile(L"night-ui-check.txt"), buf, false);
             DestroyWindow(app.hwnd);
+            if (FAILED(hr) || bw != 0) code = 1;
         }
         else
         {

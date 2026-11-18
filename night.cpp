@@ -59,6 +59,7 @@ namespace
     constexpr ULONGLONG kGammaRetry = 2000; // повтор, если драйвер отверг рампу, мс
 
     enum Hit { HitNone = -1, HitSlider = 0, HitAuto = 1, HitKey0 = 2 };
+    enum class CapBtn { None, Min, Close };
 
     const wchar_t* const kKeyTitles[3] = {L"Светлее", L"Темнее", L"Обычный экран"};
     const wchar_t kKeyHelp[] = L"Щёлкните по полю и нажмите сочетание.\nEsc — отмена, Backspace — убрать.";
@@ -84,6 +85,9 @@ namespace
     const G::Color cHint(255, 188, 188, 194);
     const G::Color cAccent(255, 232, 176, 112);
     const G::Color cWarn(255, 255, 170, 130);
+    // Подсветка крестика: пыльная, не системный красный.
+    const G::Color cCloseHot(255, 122, 56, 60);
+    const G::Color cCloseDown(255, 148, 64, 68);
 
     inline COLORREF Rgb(const G::Color& c) { return RGB(c.GetR(), c.GetG(), c.GetB()); }
 
@@ -121,6 +125,9 @@ namespace
         bool focusVisible = false;   // кольцо рисуем только после Tab, а не после мыши
         int pressed = HitNone;
         bool trackingLeave = false;
+        CapBtn capHover = CapBtn::None;
+        CapBtn capDown = CapBtn::None;
+        std::unique_ptr<G::Bitmap> capIcon;
 
         bool packaged = false;
         bool autoOn = false;
@@ -215,6 +222,7 @@ namespace
             dpi = GetDpiForWindow(hwnd);
             scale = dpi / 96.0;
             layoutWindow();
+            loadCapIcon();
             // Первый ShowWindow процесса берёт nCmdShow из STARTUPINFO (при запуске из ярлыка «свёрнуто»
             // окно застревало иконкой за краем экрана). Расходуем его на скрытое окно.
             ShowWindow(hwnd, SW_HIDE);
@@ -419,12 +427,15 @@ namespace
             bool tracking = false;
             bool done = false;
             Answer answer = Answer::Cancel;
+            CapBtn capHover = CapBtn::None;
+            CapBtn capDown = CapBtn::None;
         };
         Dialog* dlg = nullptr;
 
-        static int AskHit(const App& a, int px, int py)
+        static int AskHit(const App& a, int px, int py, int capPx)
         {
-            int x = (int)std::lround(px / a.scale), y = (int)std::lround(py / a.scale);
+            if (py < capPx) return -1;
+            int x = (int)std::lround(px / a.scale), y = (int)std::lround((py - capPx) / a.scale);
             for (int i = 0; i < 3; i++)
                 if (layout::In(layout::AskButton(i), x, y)) return i;
             return -1;
@@ -468,13 +479,25 @@ namespace
             };
             switch (msg)
             {
+            case WM_NCCALCSIZE:
+                if (wp) return a->coverCaption(h, wp, lp);
+                break;
+            case WM_NCHITTEST:
+            {
+                POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                ScreenToClient(h, &pt);
+                RECT cr{};
+                GetClientRect(h, &cr);
+                if ((unsigned)pt.x >= (unsigned)cr.right || (unsigned)pt.y >= (unsigned)cr.bottom) break;
+                auto cg = a->chrome(h, layout::kAskHeight, false);
+                if (a->capAt(cg, pt.x, pt.y) != CapBtn::None) return HTCLIENT;
+                if (pt.y < cg.capPx) return HTCAPTION;
+                if (AskHit(*a, pt.x, pt.y, cg.capPx) >= 0) return HTCLIENT;
+                return HTCAPTION;
+            }
             case WM_CREATE:
             {
-                BOOL on = TRUE;
-                DwmSetWindowAttribute(h, 20, &on, sizeof on);
-                COLORREF cap = Rgb(cBg), txt = Rgb(cFg);
-                DwmSetWindowAttribute(h, 35, &cap, sizeof cap);
-                DwmSetWindowAttribute(h, 36, &txt, sizeof txt);
+                a->darkFrame(h);
                 return 0;
             }
             case WM_PAINT:
@@ -483,22 +506,31 @@ namespace
                 HDC hdc = BeginPaint(h, &ps);
                 RECT cr;
                 GetClientRect(h, &cr);
-                a->buffered(hdc, cr.right, cr.bottom, [&](G::Graphics& g) { a->drawAsk(g, d); });
+                a->buffered(hdc, cr.right, cr.bottom, [&](G::Graphics& g) {
+                    auto cg = a->chrome(h, layout::kAskHeight, false);
+                    a->drawCaption(g, cg, d.capHover, d.capDown);
+                    g.TranslateTransform(0, cg.cap);
+                    a->drawAsk(g, d);
+                });
                 EndPaint(h, &ps);
                 return 0;
             }
             case WM_ERASEBKGND: return 1;
             case WM_MOUSEMOVE:
             {
-                int hit = AskHit(*a, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+                auto cg = a->chrome(h, layout::kAskHeight, false);
+                CapBtn ch = a->capAt(cg, x, y);
+                int hit = ch == CapBtn::None ? AskHit(*a, x, y, cg.capPx) : -1;
                 if (!d.tracking)
                 {
                     TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0};
                     d.tracking = TrackMouseEvent(&t) != FALSE;
                 }
-                if (hit != d.hover)
+                if (hit != d.hover || ch != d.capHover)
                 {
                     d.hover = hit;
+                    d.capHover = ch;
                     SetCursor(LoadCursorW(nullptr, hit >= 0 ? IDC_HAND : IDC_ARROW));
                     InvalidateRect(h, nullptr, FALSE);
                 }
@@ -507,6 +539,7 @@ namespace
             case WM_MOUSELEAVE:
                 d.tracking = false;
                 d.hover = -1;
+                d.capHover = CapBtn::None;
                 InvalidateRect(h, nullptr, FALSE);
                 return 0;
             case WM_SETCURSOR:
@@ -517,7 +550,19 @@ namespace
                 }
                 break;
             case WM_LBUTTONDOWN:
-                d.pressed = AskHit(*a, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            {
+                int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+                auto cg = a->chrome(h, layout::kAskHeight, false);
+                CapBtn ch = a->capAt(cg, x, y);
+                if (ch != CapBtn::None)
+                {
+                    d.capDown = ch;
+                    d.capHover = ch;
+                    SetCapture(h);
+                    InvalidateRect(h, nullptr, FALSE);
+                    return 0;
+                }
+                d.pressed = AskHit(*a, x, y, cg.capPx);
                 if (d.pressed >= 0)
                 {
                     d.focus = d.pressed;
@@ -526,9 +571,22 @@ namespace
                 }
                 InvalidateRect(h, nullptr, FALSE);
                 return 0;
+            }
             case WM_LBUTTONUP:
             {
-                int hit = AskHit(*a, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+                auto cg = a->chrome(h, layout::kAskHeight, false);
+                CapBtn ch = a->capAt(cg, x, y);
+                if (d.capDown != CapBtn::None)
+                {
+                    CapBtn was = d.capDown;
+                    d.capDown = CapBtn::None;
+                    if (GetCapture() == h) ReleaseCapture();
+                    InvalidateRect(h, nullptr, FALSE);
+                    if (ch == was) SendMessageW(h, WM_CLOSE, 0, 0);
+                    return 0;
+                }
+                int hit = AskHit(*a, x, y, cg.capPx);
                 int was = d.pressed;
                 d.pressed = -1;
                 if (GetCapture() == h) ReleaseCapture();
@@ -1078,22 +1136,164 @@ namespace
             DeleteDC(mem);
         }
 
+        void loadCapIcon()
+        {
+            capIcon.reset();
+            int px = (int)std::lround(16.0 * scale);
+            if (px < 16) px = 16;
+            HICON ic = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, px, px, LR_DEFAULTCOLOR);
+            if (!ic) return;
+            G::Bitmap* b = G::Bitmap::FromHICON(ic);
+            DestroyIcon(ic);
+            if (b && b->GetLastStatus() == G::Ok) capIcon.reset(b);
+            else delete b;
+        }
+
+        void darkFrame(HWND w)
+        {
+            BOOL on = TRUE;
+            DwmSetWindowAttribute(w, 20, &on, sizeof on);
+            COLORREF cap = Rgb(cBg), txt = Rgb(cFg), edge = Rgb(cCardLine);
+            DwmSetWindowAttribute(w, 35, &cap, sizeof cap);
+            DwmSetWindowAttribute(w, 36, &txt, sizeof txt);
+            const DWORD kBorderColor = 34; // DWMWA_BORDER_COLOR
+            const DWORD kCornerPref = 33;  // DWMWA_WINDOW_CORNER_PREFERENCE
+            DwmSetWindowAttribute(w, kBorderColor, &edge, sizeof edge);
+            int round = 2; // DWMWCP_ROUND
+            DwmSetWindowAttribute(w, kCornerPref, &round, sizeof round);
+        }
+
+        // Клиент накрывает системную шапку: кнопки рисуем сами, без красной заливки DWM.
+        static LRESULT coverCaption(HWND w, WPARAM wp, LPARAM lp)
+        {
+            auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
+            RECT window = p->rgrc[0];
+            DefWindowProcW(w, WM_NCCALCSIZE, wp, lp);
+            if (!IsZoomed(w))
+            {
+                int border = p->rgrc[0].left - window.left;
+                if (border < 0) border = 0;
+                p->rgrc[0].top = window.top + border;
+            }
+            return 0;
+        }
+
+        struct CapGeom
+        {
+            int capPx = 0;
+            float cap = 0;
+            float width = 0;
+            G::RectF min;
+            G::RectF close;
+            bool hasMin = false;
+        };
+
+        CapGeom chrome(HWND w, int contentDu, bool wantMin) const
+        {
+            CapGeom g;
+            RECT cr{};
+            GetClientRect(w, &cr);
+            float s = (float)scale;
+            if (s < 0.01f) s = 1.f;
+            int contentPx = (int)std::lround(contentDu * (double)scale);
+            g.capPx = cr.bottom - contentPx;
+            if (g.capPx < 0) g.capPx = 0;
+            g.cap = g.capPx / s;
+            g.width = cr.right / s;
+            g.hasMin = wantMin && g.capPx > 0;
+            if (g.capPx <= 0 || g.width <= 1.f) return g;
+            float vh = g.cap - 4.f;
+            if (vh > 20.f) vh = 20.f;
+            if (vh < 12.f) vh = g.cap > 2.f ? g.cap - 2.f : g.cap;
+            const float vw = 32.f;
+            float y = (g.cap - vh) / 2.f;
+            auto at = [&](int fromRight) {
+                float x = g.width - 10.f - vw - fromRight * (vw + 6.f);
+                return G::RectF(x, y, vw, vh);
+            };
+            g.close = at(0);
+            if (g.hasMin) g.min = at(1);
+            return g;
+        }
+
+        static bool InCap(const G::RectF& r, float x, float y)
+        {
+            return x >= r.X && y >= r.Y && x < r.X + r.Width && y < r.Y + r.Height;
+        }
+
+        CapBtn capAt(const CapGeom& g, int px, int py) const
+        {
+            if (g.capPx <= 0) return CapBtn::None;
+            float x = px / (float)scale, y = py / (float)scale;
+            if (InCap(g.close, x, y)) return CapBtn::Close;
+            if (g.hasMin && InCap(g.min, x, y)) return CapBtn::Min;
+            return CapBtn::None;
+        }
+
+        void drawCaption(G::Graphics& g, const CapGeom& cg, CapBtn over, CapBtn held)
+        {
+            if (cg.capPx <= 0) return;
+            float ih = 16.f;
+            if (cg.cap < ih + 4.f) ih = std::max(8.f, cg.cap - 4.f);
+            float iy = (cg.cap - ih) / 2.f;
+            if (capIcon) g.DrawImage(capIcon.get(), 12.f, iy, ih, ih);
+            float titleX = capIcon ? 34.f : 12.f;
+            float stop = cg.hasMin ? cg.min.X : cg.close.X;
+            T(g, L"Ночник", *fBold, titleX, 0.f, std::max(8.f, stop - titleX - 8.f), cg.cap, cFg,
+              G::StringAlignmentNear, G::StringAlignmentCenter);
+            auto one = [&](const G::RectF& r, CapBtn id, bool close) {
+                bool hot = over == id;
+                if (hot)
+                {
+                    bool deep = held == id;
+                    G::Color fill = close ? (deep ? cCloseDown : cCloseHot) : (deep ? cBtnDown : cBtnHot);
+                    FillRound(g, fill, r.X, r.Y, r.Width, r.Height, r.Height / 2.f);
+                }
+                float cx = r.X + r.Width / 2.f, cy = r.Y + r.Height / 2.f;
+                G::Pen pen(hot ? cFg : cHint, 1.5f);
+                pen.SetStartCap(G::LineCapRound);
+                pen.SetEndCap(G::LineCapRound);
+                if (close)
+                {
+                    const float d = 4.25f;
+                    g.DrawLine(&pen, cx - d, cy - d, cx + d, cy + d);
+                    g.DrawLine(&pen, cx - d, cy + d, cx + d, cy - d);
+                }
+                else g.DrawLine(&pen, cx - 5.f, cy, cx + 5.f, cy);
+            };
+            if (cg.hasMin) one(cg.min, CapBtn::Min, false);
+            one(cg.close, CapBtn::Close, true);
+        }
+
+        // Содержимое — в координатах layout.h, ниже шапки.
+        void drawAll(G::Graphics& g)
+        {
+            CapGeom cg = chrome(hwnd, layout::kHeight, true);
+            drawCaption(g, cg, capHover, capDown);
+            g.TranslateTransform(0, cg.cap);
+            draw(g);
+        }
+
         void paint(HDC hdc, int w, int h)
         {
-            buffered(hdc, w, h, [&](G::Graphics& g) { draw(g); });
+            buffered(hdc, w, h, [&](G::Graphics& g) { drawAll(g); });
         }
 
         // Снимок окна в PNG (--render): проверка внешнего вида без экрана.
         bool renderPng(const std::wstring& path)
         {
-            G::Bitmap bmp((INT)std::lround(layout::kWidth * scale), (INT)std::lround(layout::kHeight * scale), PixelFormat32bppRGB);
+            RECT cr{};
+            GetClientRect(hwnd, &cr);
+            int w = (int)cr.right, h = (int)cr.bottom;
+            if (w < 1 || h < 1) return false;
+            G::Bitmap bmp(w, h, PixelFormat32bppRGB);
             {
                 G::Graphics g(&bmp);
                 g.SetSmoothingMode(G::SmoothingModeAntiAlias);
                 g.SetTextRenderingHint(G::TextRenderingHintClearTypeGridFit);
                 g.ScaleTransform((G::REAL)scale, (G::REAL)scale);
                 g.Clear(cBg);
-                draw(g);
+                drawAll(g);
             }
             UINT n = 0, bytes = 0;
             G::GetImageEncodersSize(&n, &bytes);
@@ -1274,11 +1474,7 @@ namespace
             {
             case WM_CREATE:
             {
-                BOOL on = TRUE;
-                DwmSetWindowAttribute(h, 20, &on, sizeof on);
-                COLORREF cap = Rgb(cBg), txt = Rgb(cFg);
-                DwmSetWindowAttribute(h, 35, &cap, sizeof cap);
-                DwmSetWindowAttribute(h, 36, &txt, sizeof txt);
+                darkFrame(h);
                 if (live) addTray();
                 return 0;
             }
@@ -1297,6 +1493,7 @@ namespace
             {
                 dpi = HIWORD(wp);
                 scale = dpi / 96.0;
+                loadCapIcon();
                 const RECT* r = (const RECT*)lp;
                 SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
                 invalidate();
@@ -1402,8 +1599,26 @@ namespace
                 break;
             case WM_SYSCOMMAND:
                 if (capture >= 0 && (wp & 0xFFF0) == SC_KEYMENU) return 0;
+                if ((wp & 0xFFF0) == SC_MAXIMIZE) return 0;
                 break;
 
+            case WM_NCCALCSIZE:
+                if (wp) return coverCaption(h, wp, lp);
+                break;
+            case WM_NCHITTEST:
+            {
+                // Пустое место тянет окно. Нажимаемые зоны и кнопки шапки — обычный клиент.
+                POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                ScreenToClient(h, &pt);
+                RECT cr{};
+                GetClientRect(h, &cr);
+                if ((unsigned)pt.x >= (unsigned)cr.right || (unsigned)pt.y >= (unsigned)cr.bottom) break;
+                CapGeom cg = chrome(h, layout::kHeight, true);
+                if (capAt(cg, pt.x, pt.y) != CapBtn::None) return HTCLIENT;
+                if (pt.y < cg.capPx) return HTCAPTION;
+                if (hitTest(pt.x, pt.y - cg.capPx) != HitNone) return HTCLIENT;
+                return HTCAPTION;
+            }
             case WM_MOUSEWHEEL:
                 nudge(GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1);
                 return 0;
@@ -1413,7 +1628,8 @@ namespace
                     POINT pt;
                     GetCursorPos(&pt);
                     ScreenToClient(h, &pt);
-                    if (hitTest(pt.x, pt.y) != HitNone)
+                    CapGeom cg = chrome(h, layout::kHeight, true);
+                    if (capAt(cg, pt.x, pt.y) == CapBtn::None && hitTest(pt.x, pt.y - cg.capPx) != HitNone)
                     {
                         SetCursor(LoadCursorW(nullptr, IDC_HAND));
                         return TRUE;
@@ -1423,7 +1639,18 @@ namespace
             case WM_LBUTTONDOWN:
             {
                 int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-                int hit = hitTest(x, y);
+                CapGeom cg = chrome(h, layout::kHeight, true);
+                CapBtn ch = capAt(cg, x, y);
+                if (ch != CapBtn::None)
+                {
+                    SetFocus(h);
+                    SetCapture(h);
+                    capDown = ch;
+                    capHover = ch;
+                    invalidate();
+                    return 0;
+                }
+                int hit = hitTest(x, y - cg.capPx);
                 SetFocus(h);
                 SetCapture(h);
                 pressed = hit;
@@ -1446,10 +1673,13 @@ namespace
                     TrackMouseEvent(&te);
                     trackingLeave = true;
                 }
-                int hit = hitTest(x, y);
-                if (hit != hover)
+                CapGeom cg = chrome(h, layout::kHeight, true);
+                CapBtn ch = capAt(cg, x, y);
+                int hit = ch == CapBtn::None ? hitTest(x, y - cg.capPx) : HitNone;
+                if (hit != hover || ch != capHover)
                 {
                     hover = hit;
+                    capHover = ch;
                     invalidate();
                 }
                 if (drag) setBar(SliderValueAt(x / scale));
@@ -1457,15 +1687,32 @@ namespace
             }
             case WM_MOUSELEAVE:
                 trackingLeave = false;
-                if (hover != HitNone)
+                if (hover != HitNone || capHover != CapBtn::None)
                 {
                     hover = HitNone;
+                    capHover = CapBtn::None;
                     invalidate();
                 }
                 return 0;
             case WM_LBUTTONUP:
             {
-                int hit = hitTest(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+                int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+                CapGeom cg = chrome(h, layout::kHeight, true);
+                CapBtn ch = capAt(cg, x, y);
+                if (capDown != CapBtn::None)
+                {
+                    CapBtn was = capDown;
+                    capDown = CapBtn::None;
+                    if (GetCapture() == h) ReleaseCapture();
+                    invalidate();
+                    if (ch == was)
+                    {
+                        if (was == CapBtn::Min) ShowWindow(h, SW_MINIMIZE);
+                        else SendMessageW(h, WM_CLOSE, 0, 0);
+                    }
+                    return 0;
+                }
+                int hit = hitTest(x, y - cg.capPx);
                 int was = pressed;
                 bool wasDrag = drag;
                 pressed = HitNone;
@@ -1473,10 +1720,7 @@ namespace
                 ReleaseCapture();
                 // Последние шаги ползунка могли не дойти до гаммы из-за паузы kApplyGap.
                 if (wasDrag) applyNow(true);
-                if (hit != HitNone && hit == was)
-                {
-                    activate(hit);
-                }
+                if (hit != HitNone && hit == was) activate(hit);
                 invalidate();
                 return 0;
             }
@@ -1562,7 +1806,7 @@ int WINAPI wWinMain(_In_ HINSTANCE inst, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ in
 
     SetUnhandledExceptionFilter(CrashFilter);
 
-    std::wstring renderPath = ArgAfter(argc, argv, L"--render"); // снимок окна в PNG: --render файл.png [--dim N] [--focus N] [--hover N] [--capture N]
+    std::wstring renderPath = ArgAfter(argc, argv, L"--render"); // снимок окна в PNG: --render файл.png [--dim N] [--focus N] [--hover N] [--capture N] [--cap 1|2]
     bool checkUi = HasArg(argc, argv, L"--check-ui") || !renderPath.empty();
     bool background = HasArg(argc, argv, L"--background");
     if (!checkUi && !background)
@@ -1615,6 +1859,9 @@ int WINAPI wWinMain(_In_ HINSTANCE inst, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ in
             app.focusVisible = app.focus != HitNone;
             app.hover = num(L"--hover", HitNone);
             app.capture = num(L"--capture", -1);
+            int capn = num(L"--cap", 0);
+            if (capn == 1) app.capHover = CapBtn::Min;
+            else if (capn == 2) app.capHover = CapBtn::Close;
             app.refreshTexts();
             code = app.renderPng(renderPath) ? 0 : 1;
             DestroyWindow(app.hwnd);

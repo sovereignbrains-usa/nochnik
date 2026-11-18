@@ -139,7 +139,6 @@ namespace
 
         std::unique_ptr<G::PrivateFontCollection> fontColl; // шрифты Onest из ресурсов; живёт дольше шрифтов ниже
         std::unique_ptr<G::Font> fTitle, fSub, fBase, fBold, fValue, fSmall, fFoot;
-        std::unique_ptr<G::Bitmap> iconBmp;
 
         // Onest (SIL OFL) зашит в exe: Regular и Bold. Нет ресурса или не прочитался — остаётся Segoe UI.
         std::unique_ptr<G::FontFamily> loadFamily()
@@ -216,23 +215,11 @@ namespace
 
             dpi = GetDpiForWindow(hwnd);
             scale = dpi / 96.0;
-            loadIcon();
             layoutWindow();
             // Первый ShowWindow процесса берёт nCmdShow из STARTUPINFO (при запуске из ярлыка «свёрнуто»
             // окно застревало иконкой за краем экрана). Расходуем его на скрытое окно.
             ShowWindow(hwnd, SW_HIDE);
             return true;
-        }
-
-        // Значок в шапке: берём размер под текущий масштаб экрана, чтобы не размывался.
-        void loadIcon()
-        {
-            int px = (int)std::lround(44 * scale);
-            HICON ic = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, px, px, LR_DEFAULTCOLOR);
-            iconBmp.reset();
-            if (!ic) return;
-            iconBmp.reset(G::Bitmap::FromHICON(ic));
-            DestroyIcon(ic);
         }
 
         void start()
@@ -1128,10 +1115,9 @@ namespace
             const auto Far = G::StringAlignmentFar;
             auto focused = [&](int hit) { return focusVisible && focus == hit; };
 
-            // Шапка.
-            if (iconBmp) g.DrawImage(iconBmp.get(), 16.0f, 10.0f, 44.0f, 44.0f);
-            T(g, L"Ночник", *fTitle, 70, 10, 330, 28, cFg);
-            T(g, L"Тёплый свет для экрана по вечерам", *fSub, 70, 38, 330, 20, cMuted);
+            // Значок уже в заголовке окна — в шапке его не повторяем.
+            T(g, L"Ночник", *fTitle, 20, 10, 380, 28, cFg);
+            T(g, L"Тёплый свет для экрана по вечерам", *fSub, 20, 38, 380, 20, cMuted);
 
             // Тусклость.
             Card(g, kLevelCard);
@@ -1313,7 +1299,6 @@ namespace
             {
                 dpi = HIWORD(wp);
                 scale = dpi / 96.0;
-                loadIcon();
                 const RECT* r = (const RECT*)lp;
                 SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
                 invalidate();

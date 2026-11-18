@@ -138,7 +138,7 @@ namespace
         UINT taskbarCreated = 0;
 
         std::unique_ptr<G::PrivateFontCollection> fontColl; // шрифты Onest из ресурсов; живёт дольше шрифтов ниже
-        std::unique_ptr<G::Font> fTitle, fSub, fBase, fBold, fValue, fSmall, fFoot;
+        std::unique_ptr<G::Font> fSub, fBase, fBold, fValue, fSmall, fFoot;
 
         // Onest (SIL OFL) зашит в exe: Regular и Bold. Нет ресурса или не прочитался — остаётся Segoe UI.
         std::unique_ptr<G::FontFamily> loadFamily()
@@ -178,7 +178,6 @@ namespace
                 int style = (bold ? G::FontStyleBold : G::FontStyleRegular) | (underline ? G::FontStyleUnderline : 0);
                 return std::make_unique<G::Font>(fam.get(), pt * 96.0f / 72.0f, style, G::UnitPixel);
             };
-            fTitle = mk(17, true);
             fSub = mk(9.5f, false);
             fBase = mk(10, false);
             fBold = mk(10, true);
@@ -1115,9 +1114,8 @@ namespace
             const auto Far = G::StringAlignmentFar;
             auto focused = [&](int hit) { return focusVisible && focus == hit; };
 
-            // Значок уже в заголовке окна — в шапке его не повторяем.
-            T(g, L"Ночник", *fTitle, 20, 10, 380, 28, cFg);
-            T(g, L"Тёплый свет для экрана по вечерам", *fSub, 20, 38, 380, 20, cMuted);
+            // Название уже в заголовке окна.
+            T(g, L"Тёплый свет для экрана по вечерам", *fSub, 20, 18, 380, 22, cMuted);
 
             // Тусклость.
             Card(g, kLevelCard);

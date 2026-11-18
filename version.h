@@ -2,6 +2,6 @@
 // Единственное место с версией: читают night.rc, package.ps1 и сам Night.exe.
 #define NIGHT_VER_MAJOR 2
 #define NIGHT_VER_MINOR 2
-#define NIGHT_VER_PATCH 3
+#define NIGHT_VER_PATCH 4
 #define NIGHT_VER_BUILD 0
-#define NIGHT_VER_STR "2.2.3.0"
+#define NIGHT_VER_STR "2.2.4.0"
